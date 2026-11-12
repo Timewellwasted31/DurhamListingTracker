@@ -11,6 +11,17 @@ patchright_driver = os.path.join(
     "Python", "Python314", "site-packages", "patchright", "driver",
 )
 
+# Patchright browsers are installed separately from the driver package.
+# When frozen, patchright sets PLAYWRIGHT_BROWSERS_PATH=0 which makes it
+# look for browsers in <driver>/package/.local-browsers/.
+patchright_browsers_src = os.path.join(
+    os.environ.get("LOCALAPPDATA", ""),
+    "ms-playwright", "chromium_headless_shell-1248",
+)
+patchright_browsers_dest = os.path.join(
+    "patchright", "driver", "package", ".local-browsers", "chromium_headless_shell-1248",
+)
+
 mpl_datas, mpl_binaries, mpl_hiddenimports = collect_all("matplotlib")
 
 a = Analysis(
@@ -19,6 +30,7 @@ a = Analysis(
     binaries=mpl_binaries,
     datas=[
         (patchright_driver, "patchright/driver"),
+        (patchright_browsers_src, patchright_browsers_dest),
     ] + mpl_datas,
     hiddenimports=[
         "patchright",
