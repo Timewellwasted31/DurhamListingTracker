@@ -1,5 +1,5 @@
 #define MyAppName "Durham Listing Tracker"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.2"
 #define MyAppExeName "DurhamListingTracker.exe"
 
 [Setup]
