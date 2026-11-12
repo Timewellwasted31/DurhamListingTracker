@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 USER_AGENT = f"DurhamListingTracker/{__version__} (desktop app)"
 PHOTON_URL = "https://photon.komoot.io"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org"
 OSRM_URL = "https://router.project-osrm.org"
 TILE_HOST = "tile.openstreetmap.org"
 TILE_MAX_AGE = 30 * 24 * 3600
@@ -198,7 +199,9 @@ def _cache_put(key: str, value) -> None:
         logger.debug("geo cache write failed: %s", e)
 
 
-# --- Photon (autocomplete / geocoding) ---
+# --- Photon / Nominatim geocoding with circuit breaker ---
+
+_photon_fail_until = 0.0  # time.monotonic() timestamp; skip Photon until then
 
 def _address_label(p: dict) -> str:
     name = p.get("name") or ""
@@ -245,12 +248,7 @@ def _place_from_feature(feature: dict, kind: str) -> Optional[Place]:
     return Place(label=label, lat=lat, lon=lon, name=name, city=city)
 
 
-def search_places(query: str, kind: str = "address", near: Optional[Point] = None,
-                  limit: int = 6) -> list[Place]:
-    """Suggestions for a partially typed address (kind="address") or Ontario city (kind="city")."""
-    q = query.strip()
-    if len(q) < 2:
-        return []
+def _search_photon(q: str, kind: str, near: Optional[Point], limit: int) -> list[Place]:
     lat, lon = near or DEFAULT_CENTER
     params = [
         ("q", q),
@@ -275,15 +273,87 @@ def search_places(query: str, kind: str = "address", near: Optional[Point] = Non
     return places
 
 
+def _place_from_nominatim(item: dict, kind: str) -> Optional[Place]:
+    try:
+        lat, lon = float(item["lat"]), float(item["lon"])
+    except (KeyError, ValueError):
+        return None
+    name = item.get("name") or ""
+    display = item.get("display_name") or name
+    if kind == "city":
+        addr_type = item.get("addresstype") or item.get("type") or ""
+        if addr_type not in CITY_PLACE_TYPES and item.get("class") != "boundary":
+            return None
+        if not name:
+            return None
+        return Place(label=name, lat=lat, lon=lon, name=name, city=name)
+    return Place(label=display, lat=lat, lon=lon, name=name, city=name)
+
+
+def _search_nominatim(q: str, kind: str, near: Optional[Point], limit: int) -> list[Place]:
+    lat, lon = near or DEFAULT_CENTER
+    params = [
+        ("q", q + " Ontario" if kind == "city" else q),
+        ("format", "json"),
+        ("limit", limit),
+        ("viewbox", f"{SEARCH_BBOX[0]},{SEARCH_BBOX[1]},{SEARCH_BBOX[2]},{SEARCH_BBOX[3]}"),
+        ("bounded", "1"),
+    ]
+    data = _get_json(f"{NOMINATIM_URL}/search?{urllib.parse.urlencode(params)}")
+    if not isinstance(data, list):
+        return []
+    places: list[Place] = []
+    seen: set[str] = set()
+    for item in data:
+        place = _place_from_nominatim(item, kind)
+        if place and place.label not in seen:
+            seen.add(place.label)
+            places.append(place)
+        if len(places) >= limit:
+            break
+    return places
+
+
+def search_places(query: str, kind: str = "address", near: Optional[Point] = None,
+                  limit: int = 6) -> list[Place]:
+    """Suggestions for a partially typed address or city. Falls back to Nominatim when Photon is down."""
+    global _photon_fail_until
+    q = query.strip()
+    if len(q) < 2:
+        return []
+    if time.monotonic() < _photon_fail_until:
+        return _search_nominatim(q, kind, near, limit)
+    try:
+        return _search_photon(q, kind, near, limit)
+    except (OSError, ValueError):
+        _photon_fail_until = time.monotonic() + 300
+        logger.info("Photon unreachable, falling back to Nominatim for 5 minutes")
+    return _search_nominatim(q, kind, near, limit)
+
+
 def reverse_place(lat: float, lon: float) -> Optional[Place]:
     """Nearest known address to a point; the returned Place keeps the requested coordinates."""
-    params = urllib.parse.urlencode([("lat", lat), ("lon", lon), ("limit", 1)])
-    data = _get_json(f"{PHOTON_URL}/reverse?{params}")
-    for feature in data.get("features", []):
-        place = _place_from_feature(feature, "address")
-        if place:
-            place.lat, place.lon = lat, lon
-            return place
+    global _photon_fail_until
+    if time.monotonic() >= _photon_fail_until:
+        try:
+            params = urllib.parse.urlencode([("lat", lat), ("lon", lon), ("limit", 1)])
+            data = _get_json(f"{PHOTON_URL}/reverse?{params}")
+            for feature in data.get("features", []):
+                place = _place_from_feature(feature, "address")
+                if place:
+                    place.lat, place.lon = lat, lon
+                    return place
+        except (OSError, ValueError):
+            _photon_fail_until = time.monotonic() + 300
+    try:
+        params = urllib.parse.urlencode([("lat", lat), ("lon", lon), ("format", "json"), ("zoom", 18)])
+        data = _get_json(f"{NOMINATIM_URL}/reverse?{params}")
+        if isinstance(data, dict) and data.get("display_name"):
+            name = data.get("name") or ""
+            city = (data.get("address") or {}).get("city") or (data.get("address") or {}).get("town") or ""
+            return Place(label=data["display_name"], lat=lat, lon=lon, name=name, city=city)
+    except (OSError, ValueError):
+        pass
     return None
 
 
@@ -313,6 +383,71 @@ def locate_cities(names: list[str]) -> dict[str, Point]:
         if point:
             found[name] = point
     return found
+
+
+def _extract_rings(geojson: dict) -> list[list[Point]]:
+    """Convert a GeoJSON Polygon or MultiPolygon to a list of (lat, lon) rings."""
+    gtype = geojson.get("type", "")
+    coords = geojson.get("coordinates", [])
+    rings: list[list[Point]] = []
+    if gtype == "Polygon":
+        for ring in coords:
+            rings.append([(lat, lon) for lon, lat in ring])
+    elif gtype == "MultiPolygon":
+        for polygon in coords:
+            for ring in polygon:
+                rings.append([(lat, lon) for lon, lat in ring])
+    return rings
+
+
+def fetch_city_boundary(name: str) -> Optional[list[list[Point]]]:
+    """Boundary polygon(s) for an Ontario city, from the Nominatim cache or API."""
+    key = f"boundary:{name.strip().lower()}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return [[(p[0], p[1]) for p in ring] for ring in cached]
+    try:
+        params = [
+            ("q", f"{name} Ontario"),
+            ("format", "json"),
+            ("limit", 1),
+            ("polygon_geojson", "1"),
+            ("polygon_threshold", "0.002"),
+        ]
+        data = _get_json(f"{NOMINATIM_URL}/search?{urllib.parse.urlencode(params)}")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, list) or not data:
+        return None
+    geojson = data[0].get("geojson")
+    if not geojson:
+        return None
+    rings = _extract_rings(geojson)
+    if rings:
+        _cache_put(key, [[[lat, lon] for lat, lon in ring] for ring in rings])
+    return rings or None
+
+
+def fetch_city_boundaries(names: list[str]) -> dict[str, list[list[Point]]]:
+    """Boundary polygons for a list of cities."""
+    result: dict[str, list[list[Point]]] = {}
+    for name in names:
+        boundary = fetch_city_boundary(name)
+        if boundary:
+            result[name] = boundary
+    return result
+
+
+def warm_up() -> None:
+    """Probe Photon so the circuit breaker trips before the user ever waits for it."""
+    global _photon_fail_until
+    if time.monotonic() < _photon_fail_until:
+        return
+    try:
+        _get_json(f"{PHOTON_URL}/api/?q=test&limit=1")
+    except (OSError, ValueError):
+        _photon_fail_until = time.monotonic() + 300
+        logger.info("Photon warm-up failed, using Nominatim for 5 minutes")
 
 
 def geocode_listing(address: str, city: str) -> tuple[Optional[Place], bool]:

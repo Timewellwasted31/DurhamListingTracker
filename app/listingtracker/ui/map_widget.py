@@ -145,6 +145,13 @@ class MapRoute:
     dashed: bool = False
 
 
+@dataclass
+class MapRegion:
+    rings: list[list[tuple[float, float]]]  # each ring is a list of (lat, lon)
+    color: str = "#66bb6a"
+    label: str = ""
+
+
 class MapWidget(QWidget):
     clicked = Signal(float, float, object)  # lat, lon, global QPoint
 
@@ -155,6 +162,7 @@ class MapWidget(QWidget):
         self._zoom = 9
         self._markers: list[MapMarker] = []
         self._routes: list[MapRoute] = []
+        self._regions: list[MapRegion] = []
         self._press_pos: Optional[QPointF] = None
         self._press_center: tuple[float, float] = (0.0, 0.0)
         self._dragging = False
@@ -191,6 +199,10 @@ class MapWidget(QWidget):
 
     def set_routes(self, routes: list[MapRoute]) -> None:
         self._routes = list(routes)
+        self.update()
+
+    def set_regions(self, regions: list[MapRegion]) -> None:
+        self._regions = list(regions)
         self.update()
 
     def fit(self, points: list[tuple[float, float]], max_zoom: int = 14, padding: int = 56) -> None:
@@ -306,6 +318,7 @@ class MapWidget(QWidget):
         p.fillRect(self.rect(), QColor("#161616"))
         self._paint_tiles(p)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._paint_regions(p)
         self._paint_routes(p)
         self._paint_markers(p)
         self._paint_attribution(p)
@@ -340,6 +353,20 @@ class MapWidget(QWidget):
                         src = QRect((wx & mask) * sub, (ty & mask) * sub, sub, sub)
                         p.drawPixmap(QRect(px, py, TILE_SIZE, TILE_SIZE), parent, src)
                         break
+
+    def _paint_regions(self, p: QPainter) -> None:
+        for region in self._regions:
+            fill = QColor(region.color)
+            fill.setAlpha(45)
+            border = QColor(region.color)
+            border.setAlpha(160)
+            for ring in region.rings:
+                if len(ring) < 3:
+                    continue
+                poly = QPolygonF([self._to_screen(lat, lon) for lat, lon in ring])
+                p.setPen(QPen(border, 2))
+                p.setBrush(fill)
+                p.drawPolygon(poly)
 
     def _paint_routes(self, p: QPainter) -> None:
         for route in self._routes:
@@ -481,11 +508,15 @@ class PlaceSearchBox(QLineEdit):
         self.setText(place.label if place else "")
         self.setCursorPosition(0)
 
+    enter_plain = Signal(str)
+
     def keyPressEvent(self, event):
-        # Swallow Enter so it picks a suggestion instead of pressing the dialog's default button
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if self._suggestions and self.text().strip():
+            text = self.text().strip()
+            if self._suggestions and text:
                 self._choose(next(iter(self._suggestions.values())))
+            elif text:
+                self.enter_plain.emit(text)
             event.accept()
             return
         super().keyPressEvent(event)
@@ -538,6 +569,19 @@ class PlaceSearchBox(QLineEdit):
                 self._place = None
                 self.place_cleared.emit()
         elif self._place and text != self._place.label:
-            # Typed over a chosen place without picking a new one: keep the chosen place
             self.setText(self._place.label)
             self.setCursorPosition(0)
+        elif not self._place and text:
+            self._geocode_text(text)
+
+    def _geocode_text(self, text: str) -> None:
+        """User typed an address without picking a suggestion — look it up."""
+        self._timer.stop()
+        runner = GeoRunner(self)
+        runner.result.connect(self._on_geocode_result)
+        runner.submit(geo.search_places, text, self._kind, self.near, 1)
+        self._geocode_runner = runner  # prevent GC
+
+    def _on_geocode_result(self, places) -> None:
+        if places:
+            self._choose(places[0])

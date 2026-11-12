@@ -37,8 +37,9 @@ def test_wizard_requires_each_page_before_finishing(app, tmp_path):
         wizard.price_ceiling.setValue(400_000)
         assert wizard._monthly_estimate > 0
         wizard.monthly_ceiling.setValue(2_500)
-        assert "at least $20,000" in wizard._validate(1)
+        assert "at least" in wizard.dp_warning.text()
         wizard.down_payment.setValue(60_000)
+        assert wizard.dp_warning.text() == ""
         assert wizard._validate(1) == ""
 
         assert "city" in wizard._validate(2)

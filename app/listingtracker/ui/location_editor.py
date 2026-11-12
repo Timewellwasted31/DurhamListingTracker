@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 
 from listingtracker import geo
 from listingtracker.profiles import BuyerProfile
-from listingtracker.ui.map_widget import MapWidget, MapMarker, MapRoute, PlaceSearchBox, GeoRunner
+from listingtracker.ui.map_widget import MapWidget, MapMarker, MapRoute, MapRegion, PlaceSearchBox, GeoRunner
 
 HOME_COLOR = "#42a5f5"
 WORK_COLOR = "#ffa726"
@@ -29,6 +29,7 @@ class LocationEditor(QWidget):
         self._home: Optional[geo.Place] = None
         self._work: Optional[geo.Place] = None
         self._city_coords: dict[str, tuple[float, float]] = {}
+        self._city_boundaries: dict[str, list[list[geo.Point]]] = {}
         self._commute: Optional[geo.RouteInfo] = None
         self._pending_click: Optional[tuple[str, float, float]] = None
 
@@ -38,6 +39,10 @@ class LocationEditor(QWidget):
         self._click_runner.result.connect(self._on_click_resolved)
         self._city_runner = GeoRunner(self)
         self._city_runner.result.connect(self._on_cities_located)
+        self._boundary_runner = GeoRunner(self)
+        self._boundary_runner.result.connect(self._on_boundaries_loaded)
+        self._warmup_runner = GeoRunner(self)
+        self._warmup_runner.submit(geo.warm_up)
 
         self._build_ui()
         self._load(profile)
@@ -79,6 +84,7 @@ class LocationEditor(QWidget):
         self.city_box = PlaceSearchBox("city", clear_on_select=True)
         self.city_box.setPlaceholderText("Type a city or town to add it...")
         self.city_box.place_selected.connect(self._on_city_chosen)
+        self.city_box.enter_plain.connect(self._on_city_typed)
         left.addWidget(self.city_box)
 
         city_row = QHBoxLayout()
@@ -141,6 +147,9 @@ class LocationEditor(QWidget):
         missing = [c for c in profile.cities if c not in self._city_coords]
         if missing:
             self._city_runner.submit(geo.locate_cities, missing)
+
+        if profile.cities:
+            self._boundary_runner.submit(geo.fetch_city_boundaries, list(profile.cities))
 
         self._refresh_map(fit=True)
         self._update_commute()
@@ -210,6 +219,15 @@ class LocationEditor(QWidget):
 
     def _on_city_chosen(self, place: geo.Place) -> None:
         self._add_city(place.name, place.point())
+        self._fetch_missing_boundaries()
+
+    def _on_city_typed(self, text: str) -> None:
+        name = text.strip().title()
+        if not name:
+            return
+        self._add_city(name, None)
+        self.city_box.clear()
+        self._city_runner.submit(geo.locate_cities, [name])
 
     def _remove_city(self) -> None:
         row = self.cities_list.currentRow()
@@ -217,6 +235,7 @@ class LocationEditor(QWidget):
             return
         name = self.cities_list.takeItem(row).text()
         self._city_coords.pop(name, None)
+        self._city_boundaries.pop(name, None)
         self._refresh_map(fit=False)
         self.changed.emit()
 
@@ -238,6 +257,19 @@ class LocationEditor(QWidget):
         for city, point in found.items():
             if city in current:
                 self._city_coords[city] = point
+        self._fetch_missing_boundaries()
+        self._refresh_map(fit=True)
+
+    def _fetch_missing_boundaries(self) -> None:
+        missing = [c for c in self.cities() if c not in self._city_boundaries]
+        if missing:
+            self._boundary_runner.submit(geo.fetch_city_boundaries, missing)
+
+    def _on_boundaries_loaded(self, found) -> None:
+        if not found:
+            return
+        for city, boundary in found.items():
+            self._city_boundaries[city] = boundary
         self._refresh_map(fit=True)
 
     # --- Map ---
@@ -254,13 +286,24 @@ class LocationEditor(QWidget):
             markers.append(MapMarker(self._home.lat, self._home.lon, "Home", HOME_COLOR, "H"))
         self.map.set_markers(markers)
 
+        regions = []
+        for city in self.cities():
+            boundary = self._city_boundaries.get(city)
+            if boundary:
+                regions.append(MapRegion(rings=boundary, color=CITY_COLOR, label=city.title()))
+        self.map.set_regions(regions)
+
         routes = []
         if self._commute and self._home and self._work and not self._commute.estimated:
             routes.append(MapRoute(self._commute.points, HOME_COLOR))
         self.map.set_routes(routes)
 
         if fit and markers:
-            self.map.fit([(m.lat, m.lon) for m in markers], max_zoom=12)
+            fit_points = [(m.lat, m.lon) for m in markers]
+            for region in regions:
+                for ring in region.rings:
+                    fit_points.extend(ring)
+            self.map.fit(fit_points, max_zoom=12)
 
     def _on_map_clicked(self, lat: float, lon: float, global_pos) -> None:
         menu = QMenu(self)

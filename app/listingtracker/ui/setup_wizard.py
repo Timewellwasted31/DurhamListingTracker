@@ -253,11 +253,18 @@ class SetupWizard(QDialog):
 
         budget_group.setLayout(budget_layout)
         right.addWidget(budget_group)
+
+        self.dp_warning = QLabel()
+        self.dp_warning.setWordWrap(True)
+        self.dp_warning.setStyleSheet("color: #ffa726; font-size: 11px; padding: 4px 0;")
+        right.addWidget(self.dp_warning)
+
         right.addStretch()
         columns.addLayout(right, 1)
 
         for spin in (self.income, self.down_payment, self.debt, self.rate, self.amort, self.price_ceiling):
             spin.valueChanged.connect(self._update_finance_hints)
+        self.monthly_ceiling.valueChanged.connect(self._update_finance_hints)
         self._update_finance_hints()
         return page
 
@@ -389,6 +396,18 @@ class SetupWizard(QDialog):
             self.monthly_hint.setText("Set a maximum price to see what it would cost per month.")
         self.use_monthly_btn.setEnabled(self._monthly_estimate > 0)
 
+        if price > 0:
+            minimum = down_payment_required(price)
+            if self.down_payment.value() < minimum:
+                self.dp_warning.setText(
+                    f"⚠ A ${price:,.0f} home needs at least ${minimum:,.0f} down. "
+                    "You can still continue, but lenders will likely require a larger down payment."
+                )
+            else:
+                self.dp_warning.setText("")
+        else:
+            self.dp_warning.setText("")
+
     # --- Navigation ---
 
     def _go(self, index: int):
@@ -435,10 +454,6 @@ class SetupWizard(QDialog):
                 return "Set the most you'd pay for a home."
             if self.monthly_ceiling.value() <= 0:
                 return "Set the most you'd pay per month."
-            minimum = down_payment_required(price)
-            if self.down_payment.value() < minimum:
-                return (f"A ${price:,.0f} home needs at least ${minimum:,.0f} down. "
-                        "Raise your down payment or lower the maximum price.")
         elif index == 2:
             if not self.location.cities():
                 return "Add at least one city you'd live in."
