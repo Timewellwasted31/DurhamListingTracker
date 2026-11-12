@@ -1,0 +1,26 @@
+# User data & runtime
+data/
+cache/
+logs/
+
+# Browser binaries (718 MB Chromium — downloaded separately)
+browser/
+
+# PyInstaller build output
+app/dist/
+app/build/
+build/
+
+# Stray logs
+app/stderr.log
+
+# Installer output
+installer/*.exe
+installer/*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/

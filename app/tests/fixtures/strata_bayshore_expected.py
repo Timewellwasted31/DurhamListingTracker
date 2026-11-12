@@ -1,0 +1,25 @@
+"""Expected parsed output for strata_bayshore.html fixture."""
+
+EXPECTED = {
+    "address": "1210 Radom St",
+    "unit": "506",
+    "building_name": "The Bayshore Condominiums",
+    "city": "Pickering",
+    "neighbourhood": "Bay Ridges",
+    "mls_number": "E9876543",
+    "status": "FOR_SALE",
+    "list_price": 449_900.0,
+    "maintenance_fee": 523.45,
+    "taxes_annual": 2_450.0,
+    "beds": 2,
+    "baths": 1,
+    "sqft_min": 750,
+    "sqft_max": 750,
+    "parking": "1 Underground",
+    "locker": "Owned",
+    "exposure": "SW",
+    "days_on_market": 45,
+    "broker": "RE/MAX Realty Specialists Inc.",
+    "fee_includes": "Heat, Water, Building Insurance, Parking",
+    "parse_errors": None,
+}
