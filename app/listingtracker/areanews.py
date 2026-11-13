@@ -12,6 +12,7 @@ from email.utils import parsedate_to_datetime
 from typing import Optional
 
 from listingtracker import geo
+from listingtracker.crossref import DIRECTIONS, STREET_ABBREV_TO_FULL, _STREET_TYPE_NORMALIZE
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +49,6 @@ NOT_AN_INCIDENT = re.compile(
     r"\b(fireworks|safety tips|fire ban|open house|recruit\w*|fundrais\w*|fire sale|on fire|"
     r"goals?|league|striker|playoffs?|championship|tournament|films?|filmed|filming|premieres?)\b", re.I)
 
-STREET_TYPES = {
-    "st": "Street", "rd": "Road", "ave": "Avenue", "av": "Avenue", "dr": "Drive", "blvd": "Boulevard",
-    "cres": "Crescent", "crt": "Court", "ct": "Court", "ln": "Lane", "pl": "Place", "pkwy": "Parkway",
-    "hwy": "Highway", "terr": "Terrace", "cir": "Circle", "sq": "Square", "tr": "Trail", "gdns": "Gardens",
-}
-_DIRECTIONS = {"n", "s", "e", "w", "north", "south", "east", "west"}
 
 _STOPWORDS = {
     "after", "with", "from", "that", "this", "police", "says", "over", "into", "near", "following",
@@ -98,13 +93,15 @@ def street_names(address: str) -> list[str]:
     """Spellings of a listing's street to search for, e.g. ['Dooley Crescent', 'Dooley Cres']."""
     words = (address or "").split(",")[0].split()
     while words and any(ch.isdigit() for ch in words[0]):
-        words.pop(0)  # house and unit numbers
-    while words and words[-1].lower().strip(".") in _DIRECTIONS:
+        words.pop(0)
+    while words and words[-1].lower().strip(".") in DIRECTIONS:
         words.pop()
     if not words:
         return []
     written = " ".join(words)
-    full_type = STREET_TYPES.get(words[-1].lower().strip("."))
+    last = words[-1].lower().strip(".")
+    canonical = _STREET_TYPE_NORMALIZE.get(last, last)
+    full_type = STREET_ABBREV_TO_FULL.get(canonical)
     if full_type and len(words) > 1:
         return [" ".join(words[:-1] + [full_type]), written]
     return [written]

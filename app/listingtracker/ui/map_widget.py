@@ -41,6 +41,29 @@ def unproject(x: float, y: float, zoom: int) -> tuple[float, float]:
     return lat, lon
 
 
+def _point_in_ring(lat: float, lon: float, ring: list[tuple[float, float]]) -> bool:
+    """Ray-casting point-in-polygon test. Ring points are (lat, lon)."""
+    n = len(ring)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        lat_i, lon_i = ring[i]
+        lat_j, lon_j = ring[j]
+        if ((lat_i > lat) != (lat_j > lat)) and \
+           (lon < (lon_j - lon_i) * (lat - lat_i) / (lat_j - lat_i) + lon_i):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _point_in_region(lat: float, lon: float, region) -> bool:
+    """Check if a lat/lon point is inside any of a MapRegion's rings."""
+    for ring in region.rings:
+        if len(ring) >= 3 and _point_in_ring(lat, lon, ring):
+            return True
+    return False
+
+
 def _dark_pixmap(png: bytes) -> Optional[QPixmap]:
     """Recolour a standard (light) OSM tile for the dark theme: flip lightness, keep hue."""
     image = QImage.fromData(png)
@@ -154,15 +177,19 @@ class MapRegion:
 
 class MapWidget(QWidget):
     clicked = Signal(float, float, object)  # lat, lon, global QPoint
+    region_clicked = Signal(str)  # label of the candidate region that was clicked
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(240, 180)
+        self.setMouseTracking(True)
         self._lat, self._lon = geo.DEFAULT_CENTER
         self._zoom = 9
         self._markers: list[MapMarker] = []
         self._routes: list[MapRoute] = []
         self._regions: list[MapRegion] = []
+        self._candidate_regions: list[MapRegion] = []
+        self._hovered_candidate: Optional[int] = None
         self._press_pos: Optional[QPointF] = None
         self._press_center: tuple[float, float] = (0.0, 0.0)
         self._dragging = False
@@ -203,6 +230,11 @@ class MapWidget(QWidget):
 
     def set_regions(self, regions: list[MapRegion]) -> None:
         self._regions = list(regions)
+        self.update()
+
+    def set_candidate_regions(self, regions: list[MapRegion]) -> None:
+        self._candidate_regions = list(regions)
+        self._hovered_candidate = None
         self.update()
 
     def fit(self, points: list[tuple[float, float]], max_zoom: int = 14, padding: int = 56) -> None:
@@ -282,17 +314,18 @@ class MapWidget(QWidget):
             self._dragging = False
 
     def mouseMoveEvent(self, event):
-        if self._press_pos is None:
+        if self._press_pos is not None:
+            delta = event.position() - self._press_pos
+            if not self._dragging and delta.manhattanLength() > 4:
+                self._dragging = True
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            if self._dragging:
+                cx, cy = self._press_center
+                self._lat, self._lon = unproject(cx - delta.x(), cy - delta.y(), self._zoom)
+                self._fit = None
+                self.update()
             return
-        delta = event.position() - self._press_pos
-        if not self._dragging and delta.manhattanLength() > 4:
-            self._dragging = True
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-        if self._dragging:
-            cx, cy = self._press_center
-            self._lat, self._lon = unproject(cx - delta.x(), cy - delta.y(), self._zoom)
-            self._fit = None
-            self.update()
+        self._update_hover(event.position())
 
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton or self._press_pos is None:
@@ -300,10 +333,14 @@ class MapWidget(QWidget):
         was_dragging = self._dragging
         self._press_pos = None
         self._dragging = False
-        self.unsetCursor()
         if not was_dragging:
             lat, lon = self._to_latlon(event.position())
-            self.clicked.emit(lat, lon, event.globalPosition().toPoint())
+            if self._hovered_candidate is not None:
+                region = self._candidate_regions[self._hovered_candidate]
+                self.region_clicked.emit(region.label)
+            else:
+                self.clicked.emit(lat, lon, event.globalPosition().toPoint())
+        self._update_hover(event.position())
 
     def wheelEvent(self, event):
         self._wheel_accum += event.angleDelta().y()
@@ -313,11 +350,34 @@ class MapWidget(QWidget):
             self._zoom_by(1 if steps > 0 else -1, event.position())
         event.accept()
 
+    def _update_hover(self, pos: QPointF) -> None:
+        lat, lon = self._to_latlon(pos)
+        old = self._hovered_candidate
+        self._hovered_candidate = None
+        for i, region in enumerate(self._candidate_regions):
+            if _point_in_region(lat, lon, region):
+                self._hovered_candidate = i
+                break
+        if self._hovered_candidate is not None:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.unsetCursor()
+        if self._hovered_candidate != old:
+            self.update()
+
+    def leaveEvent(self, event):
+        if self._hovered_candidate is not None:
+            self._hovered_candidate = None
+            self.unsetCursor()
+            self.update()
+        super().leaveEvent(event)
+
     def paintEvent(self, event):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor("#161616"))
         self._paint_tiles(p)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._paint_candidate_regions(p)
         self._paint_regions(p)
         self._paint_routes(p)
         self._paint_markers(p)
@@ -353,6 +413,52 @@ class MapWidget(QWidget):
                         src = QRect((wx & mask) * sub, (ty & mask) * sub, sub, sub)
                         p.drawPixmap(QRect(px, py, TILE_SIZE, TILE_SIZE), parent, src)
                         break
+
+    def _paint_candidate_regions(self, p: QPainter) -> None:
+        for i, region in enumerate(self._candidate_regions):
+            is_hovered = (i == self._hovered_candidate)
+            fill = QColor(region.color)
+            border = QColor(region.color)
+            if is_hovered:
+                fill.setAlpha(55)
+                border.setAlpha(200)
+            else:
+                fill.setAlpha(10)
+                border.setAlpha(40)
+            for ring in region.rings:
+                if len(ring) < 3:
+                    continue
+                poly = QPolygonF([self._to_screen(lat, lon) for lat, lon in ring])
+                pen = QPen(border, 2 if is_hovered else 1)
+                if not is_hovered:
+                    pen.setStyle(Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(fill)
+                p.drawPolygon(poly)
+            if is_hovered and region.label:
+                self._paint_region_label(p, region)
+
+    def _paint_region_label(self, p: QPainter, region: MapRegion) -> None:
+        ring = region.rings[0] if region.rings else []
+        if not ring:
+            return
+        avg_lat = sum(pt[0] for pt in ring) / len(ring)
+        avg_lon = sum(pt[1] for pt in ring) / len(ring)
+        center = self._to_screen(avg_lat, avg_lon)
+        font = QFont(self.font())
+        font.setPointSize(11)
+        font.setBold(True)
+        p.setFont(font)
+        metrics = QFontMetrics(font)
+        text_w = metrics.horizontalAdvance(region.label)
+        text_h = metrics.height()
+        box = QRect(int(center.x()) - text_w // 2 - 6, int(center.y()) - text_h // 2 - 3,
+                    text_w + 12, text_h + 6)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(20, 20, 20, 210))
+        p.drawRoundedRect(box, 4, 4)
+        p.setPen(QColor("#e0e0e0"))
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, region.label)
 
     def _paint_regions(self, p: QPainter) -> None:
         for region in self._regions:
@@ -426,15 +532,25 @@ class MapWidget(QWidget):
 
 
 class GeoRunner(QObject):
-    """Runs blocking geo lookups on a background thread; only the newest request's result is delivered."""
+    """Runs blocking geo lookups on a background thread; only the newest request's result is delivered.
+
+    Do NOT pass a parent — the runner must outlive the widget so background
+    threads can safely emit after the widget is destroyed.  Qt automatically
+    disconnects the ``result`` signal from destroyed receivers.
+    """
 
     result = Signal(object)  # None when the lookup failed
     _done = Signal(int, object)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
         self._request_id = 0
+        self._cancelled = False
         self._done.connect(self._on_done)
+
+    def cancel(self) -> None:
+        self._cancelled = True
+        self._request_id += 1
 
     def submit(self, fn: Callable, *args) -> None:
         self._request_id += 1
@@ -446,15 +562,17 @@ class GeoRunner(QObject):
             except Exception as e:
                 logger.info("Geo lookup failed: %s", e)
                 value = None
+            if self._cancelled:
+                return
             try:
                 self._done.emit(request_id, value)
             except RuntimeError:
-                pass  # the widget that asked was closed while the lookup ran
+                pass  # the runner was collected while the lookup ran
 
         threading.Thread(target=work, daemon=True).start()
 
     def _on_done(self, request_id: int, value) -> None:
-        if request_id == self._request_id:
+        if not self._cancelled and request_id == self._request_id:
             self.result.emit(value)
 
 
@@ -494,7 +612,7 @@ class PlaceSearchBox(QLineEdit):
         self._timer.setSingleShot(True)
         self._timer.setInterval(350)
         self._timer.timeout.connect(self._query)
-        self._runner = GeoRunner(self)
+        self._runner = GeoRunner()
         self._runner.result.connect(self._on_results)
 
         self.textEdited.connect(self._on_text_edited)
@@ -577,7 +695,7 @@ class PlaceSearchBox(QLineEdit):
     def _geocode_text(self, text: str) -> None:
         """User typed an address without picking a suggestion — look it up."""
         self._timer.stop()
-        runner = GeoRunner(self)
+        runner = GeoRunner()
         runner.result.connect(self._on_geocode_result)
         runner.submit(geo.search_places, text, self._kind, self.near, 1)
         self._geocode_runner = runner  # prevent GC

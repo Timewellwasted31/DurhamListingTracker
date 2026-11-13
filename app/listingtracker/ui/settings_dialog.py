@@ -8,6 +8,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
+from listingtracker.finance import FinanceConfig
+
+_FC = FinanceConfig()
+
 SETTINGS_STYLE = """
 QDialog {
     background: #1e1e1e;
@@ -104,72 +108,72 @@ class SettingsDialog(QDialog):
         self.down_payment.setRange(0, 10_000_000)
         self.down_payment.setDecimals(0)
         self.down_payment.setPrefix("$")
-        self.down_payment.setValue(self.config.get("down_payment_available", 240_000))
+        self.down_payment.setValue(self.config.get("down_payment_available", _FC.down_payment_available))
         form.addRow("Down payment available:", self.down_payment)
 
         self.income = QDoubleSpinBox()
         self.income.setRange(0, 10_000_000)
         self.income.setDecimals(0)
         self.income.setPrefix("$")
-        self.income.setValue(self.config.get("annual_income", 60_000))
+        self.income.setValue(self.config.get("annual_income", _FC.annual_income))
         form.addRow("Annual income:", self.income)
 
         self.debt = QDoubleSpinBox()
         self.debt.setRange(0, 100_000)
         self.debt.setDecimals(0)
         self.debt.setPrefix("$")
-        self.debt.setValue(self.config.get("monthly_debt_obligations", 0))
+        self.debt.setValue(self.config.get("monthly_debt_obligations", _FC.monthly_debt_obligations))
         form.addRow("Monthly debt obligations:", self.debt)
 
         self.rate = QDoubleSpinBox()
         self.rate.setRange(0.001, 0.20)
         self.rate.setDecimals(4)
         self.rate.setSingleStep(0.0025)
-        self.rate.setValue(self.config.get("contract_rate", 0.04))
+        self.rate.setValue(self.config.get("contract_rate", _FC.contract_rate))
         form.addRow("Contract rate:", self.rate)
 
         self.amort = QSpinBox()
         self.amort.setRange(5, 30)
-        self.amort.setValue(self.config.get("amortization_years", 25))
+        self.amort.setValue(self.config.get("amortization_years", _FC.amortization_years))
         form.addRow("Amortization (years):", self.amort)
 
         self.gds = QDoubleSpinBox()
         self.gds.setRange(0.01, 1.0)
         self.gds.setDecimals(2)
         self.gds.setSingleStep(0.01)
-        self.gds.setValue(self.config.get("gds_limit", 0.39))
+        self.gds.setValue(self.config.get("gds_limit", _FC.gds_limit))
         form.addRow("GDS limit:", self.gds)
 
         self.tds = QDoubleSpinBox()
         self.tds.setRange(0.01, 1.0)
         self.tds.setDecimals(2)
         self.tds.setSingleStep(0.01)
-        self.tds.setValue(self.config.get("tds_limit", 0.44))
+        self.tds.setValue(self.config.get("tds_limit", _FC.tds_limit))
         form.addRow("TDS limit:", self.tds)
 
         self.heat = QDoubleSpinBox()
         self.heat.setRange(0, 1000)
         self.heat.setDecimals(0)
         self.heat.setPrefix("$")
-        self.heat.setValue(self.config.get("lender_heat_estimate", 100))
+        self.heat.setValue(self.config.get("lender_heat_estimate", _FC.lender_heat_estimate))
         form.addRow("Heat estimate (when not in fee):", self.heat)
 
         self.hydro = QDoubleSpinBox()
         self.hydro.setRange(0, 1000)
         self.hydro.setDecimals(0)
         self.hydro.setPrefix("$")
-        self.hydro.setValue(self.config.get("hydro_estimate", 90))
+        self.hydro.setValue(self.config.get("hydro_estimate", _FC.hydro_estimate))
         form.addRow("Hydro estimate (when not in fee):", self.hydro)
 
         self.insurance = QDoubleSpinBox()
         self.insurance.setRange(0, 1000)
         self.insurance.setDecimals(0)
         self.insurance.setPrefix("$")
-        self.insurance.setValue(self.config.get("insurance_estimate", 40))
+        self.insurance.setValue(self.config.get("insurance_estimate", _FC.insurance_estimate))
         form.addRow("Insurance estimate:", self.insurance)
 
         self.ftb = QCheckBox("First-time buyer (LTT rebate)")
-        self.ftb.setChecked(self.config.get("first_time_buyer", False))
+        self.ftb.setChecked(self.config.get("first_time_buyer", _FC.first_time_buyer))
         form.addRow(self.ftb)
 
         group.setLayout(form)

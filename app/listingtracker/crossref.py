@@ -38,13 +38,7 @@ def _normalize_address(addr: str) -> str:
     addr = addr.lower().strip()
     addr = re.sub(r'[.,#\-]', ' ', addr)
     addr = re.sub(r'\s+', ' ', addr)
-    addr = re.sub(r'\b(street|st|avenue|ave|drive|dr|road|rd|boulevard|blvd|'
-                  r'crescent|cres|court|ct|lane|ln|way|terrace|ter|place|pl)\b',
-                  lambda m: {
-                      'street': 'st', 'avenue': 'ave', 'drive': 'dr',
-                      'road': 'rd', 'boulevard': 'blvd', 'crescent': 'cres',
-                      'court': 'ct', 'lane': 'ln', 'terrace': 'ter', 'place': 'pl',
-                  }.get(m.group(0), m.group(0)), addr)
+    addr = _NORMALIZE_RE.sub(lambda m: _STREET_TYPE_NORMALIZE[m.group(0)], addr)
     return addr.strip()
 
 
@@ -60,11 +54,27 @@ def _normalize_city(city: str) -> str:
     return city.lower().strip()
 
 
-# Directions are left off as often as not, so they don't count towards a street's identity
-_DIRECTIONS = {"n", "s", "e", "w", "north", "south", "east", "west"}
-# Street-type spellings _normalize_address doesn't already fold together
-_TYPE_ALIASES = {"crt": "ct", "terr": "ter", "circle": "cir", "parkway": "pkwy", "trail": "tr",
-                 "highway": "hwy", "square": "sq", "gardens": "gdns"}
+DIRECTIONS = {"n", "s", "e", "w", "north", "south", "east", "west"}
+
+_STREET_TYPE_NORMALIZE = {
+    "street": "st", "avenue": "ave", "drive": "dr", "road": "rd",
+    "boulevard": "blvd", "crescent": "cres", "court": "ct", "lane": "ln",
+    "terrace": "ter", "place": "pl",
+    "crt": "ct", "terr": "ter", "av": "ave",
+    "circle": "cir", "parkway": "pkwy", "trail": "tr",
+    "highway": "hwy", "square": "sq", "gardens": "gdns",
+}
+
+STREET_ABBREV_TO_FULL = {
+    "st": "Street", "rd": "Road", "ave": "Avenue", "dr": "Drive",
+    "blvd": "Boulevard", "cres": "Crescent", "ct": "Court", "ln": "Lane",
+    "pl": "Place", "ter": "Terrace", "cir": "Circle", "pkwy": "Parkway",
+    "hwy": "Highway", "sq": "Square", "tr": "Trail", "gdns": "Gardens",
+}
+
+_NORMALIZE_RE = re.compile(
+    r'\b(' + '|'.join(sorted(_STREET_TYPE_NORMALIZE, key=len, reverse=True)) + r')\b'
+)
 _UNIT_WORDS = {"unit", "apt", "apartment", "suite", "ste", "ph"}
 
 
@@ -89,7 +99,7 @@ def _street_identity(address: str) -> tuple[Optional[str], list[str], list[str]]
     leading = tokens[:start]
     number = leading[-1] if leading else None
     units.extend(leading[:-1])  # "36 43 taunton" -> unit 36 at number 43
-    name = [_TYPE_ALIASES.get(tok, tok) for tok in tokens[start:] if tok not in _DIRECTIONS]
+    name = [_STREET_TYPE_NORMALIZE.get(tok, tok) for tok in tokens[start:] if tok not in DIRECTIONS]
     return number, name, [_normalize_unit(u) for u in units]
 
 

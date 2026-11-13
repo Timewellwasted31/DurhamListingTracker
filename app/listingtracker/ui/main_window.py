@@ -53,6 +53,7 @@ from listingtracker.ui.settings_dialog import SettingsDialog
 from listingtracker.ui.profile_dialog import ProfileDialog
 from listingtracker.paths import EXPORTS_DIR
 from listingtracker.__version__ import __version__
+from listingtracker.updater import check_for_update, download_installer, launch_installer, UpdateInfo
 
 logger = logging.getLogger(__name__)
 
@@ -494,6 +495,34 @@ class EnrichWorker(QObject):
             self.error.emit(str(e))
 
 
+class UpdateCheckWorker(QObject):
+    finished = Signal(object)  # UpdateInfo or None
+
+    def run(self):
+        result = check_for_update()
+        self.finished.emit(result)
+
+
+class _DownloadWorker(QObject):
+    progress = Signal(int, int)  # downloaded, total
+    finished = Signal(str)       # path to installer
+    error = Signal(str)
+
+    def __init__(self, url: str):
+        super().__init__()
+        self.url = url
+
+    def run(self):
+        try:
+            path = download_installer(
+                self.url,
+                progress_callback=lambda d, t: self.progress.emit(d, t),
+            )
+            self.finished.emit(str(path))
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     _area_news_ready = Signal(int, object)  # listing id, AreaNews (None if the lookup crashed)
 
@@ -523,12 +552,16 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._update_elapsed)
 
+        self._update_thread: Optional[QThread] = None
+        self._update_info: Optional[UpdateInfo] = None
+
         self._build_ui()
         self._load_active_profile()
         self._load_listings()
         if not list_profiles():
-            # Deferred so the main window is on screen behind the wizard
             QTimer.singleShot(0, self._run_setup_wizard)
+
+        QTimer.singleShot(3000, self._check_for_updates)
 
     def _build_ui(self):
         central = QWidget()
@@ -682,6 +715,38 @@ class MainWindow(QMainWindow):
         self.changes_frame.setVisible(False)
         root.addWidget(self.changes_frame)
 
+        # Update banner
+        self.update_frame = QWidget()
+        self.update_frame.setObjectName("updatePanel")
+        self.update_frame.setStyleSheet(
+            "#updatePanel { background: #1a2a1a; border-bottom: 1px solid #2a4a2a; }"
+        )
+        uf_layout = QHBoxLayout(self.update_frame)
+        uf_layout.setContentsMargins(12, 6, 12, 6)
+        self.update_label = QLabel()
+        self.update_label.setStyleSheet("color: #81c784; font-size: 12px;")
+        uf_layout.addWidget(self.update_label)
+        uf_layout.addStretch()
+        self.update_btn = QPushButton("Download && Install")
+        self.update_btn.setStyleSheet(
+            "QPushButton { background: #2e7d32; color: #fff; border: none; "
+            "font-weight: bold; padding: 4px 14px; border-radius: 3px; }"
+            "QPushButton:hover { background: #388e3c; }"
+        )
+        self.update_btn.clicked.connect(self._do_update)
+        uf_layout.addWidget(self.update_btn)
+        self.update_dismiss_btn = QPushButton("X")
+        self.update_dismiss_btn.setFixedSize(22, 22)
+        self.update_dismiss_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #888; border: none; "
+            "font-weight: bold; font-size: 14px; }"
+            "QPushButton:hover { color: #ef5350; }"
+        )
+        self.update_dismiss_btn.clicked.connect(lambda: self.update_frame.setVisible(False))
+        uf_layout.addWidget(self.update_dismiss_btn)
+        self.update_frame.setVisible(False)
+        root.addWidget(self.update_frame)
+
         # Splitter: sidebar + detail
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
@@ -834,6 +899,78 @@ class MainWindow(QMainWindow):
         self.profile_summary.setText("  |  ".join(parts))
         self.setWindowTitle(f"Durham Listing Tracker — {p.name}")
 
+    # -- Auto-update --------------------------------------------------------
+
+    def _check_for_updates(self):
+        if self._update_thread is not None:
+            return
+        self._update_thread = QThread()
+        worker = UpdateCheckWorker()
+        worker.moveToThread(self._update_thread)
+        self._update_thread.started.connect(worker.run)
+        worker.finished.connect(self._on_update_check_done)
+        worker.finished.connect(self._update_thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        self._update_thread.finished.connect(self._update_thread.deleteLater)
+        self._update_thread.finished.connect(lambda: setattr(self, "_update_thread", None))
+        self._update_thread.start()
+
+    def _on_update_check_done(self, info: Optional[UpdateInfo]):
+        if info is None or not info.is_newer or not info.download_url:
+            return
+        self._update_info = info
+        self.update_label.setText(
+            f"Update available: v{info.latest_version}  (you have v{info.current_version})"
+        )
+        self.update_frame.setVisible(True)
+
+    def _do_update(self):
+        if not self._update_info or not self._update_info.download_url:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Update Available",
+            f"Download and install v{self._update_info.latest_version}?\n\n"
+            "The app will close and reopen automatically.\n"
+            "Your data and profiles will be preserved.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.update_btn.setEnabled(False)
+        self.update_btn.setText("Downloading...")
+        self._update_thread = QThread()
+        worker = _DownloadWorker(self._update_info.download_url)
+        worker.moveToThread(self._update_thread)
+        self._update_thread.started.connect(worker.run)
+        worker.progress.connect(self._on_download_progress)
+        worker.finished.connect(self._on_download_done)
+        worker.error.connect(self._on_download_error)
+        worker.finished.connect(self._update_thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        self._update_thread.finished.connect(self._update_thread.deleteLater)
+        self._update_thread.finished.connect(lambda: setattr(self, "_update_thread", None))
+        self._update_thread.start()
+
+    def _on_download_progress(self, downloaded: int, total: int):
+        if total > 0:
+            pct = int(downloaded * 100 / total)
+            self.update_btn.setText(f"Downloading... {pct}%")
+        else:
+            mb = downloaded / (1024 * 1024)
+            self.update_btn.setText(f"Downloading... {mb:.1f} MB")
+
+    def _on_download_done(self, path: str):
+        self.update_btn.setText("Installing...")
+        launch_installer(Path(path))
+
+    def _on_download_error(self, msg: str):
+        self.update_btn.setEnabled(True)
+        self.update_btn.setText("Download && Install")
+        QMessageBox.warning(self, "Update Failed", f"Could not download the update:\n{msg}")
+
+    # -- Setup wizard / Profiles -------------------------------------------
+
     def _run_setup_wizard(self):
         from listingtracker.ui.setup_wizard import SetupWizard
 
@@ -893,7 +1030,12 @@ class MainWindow(QMainWindow):
             self._active_profile = None
             set_active_profile_name("")
             self._refresh_profile_combo()
+            self.profile_combo.blockSignals(True)
             self.profile_combo.setCurrentIndex(0)
+            self.profile_combo.blockSignals(False)
+            self.detail_pane.set_profile(None)
+            self._update_profile_summary()
+            self._populate_list()
 
     # --- Listing display ---
 
@@ -1888,6 +2030,7 @@ class MainWindow(QMainWindow):
             ("_fetch_thread", "_worker"),
             ("_search_thread", "_search_worker"),
             ("_enrich_thread", "_enrich_worker"),
+            ("_history_thread", "_history_worker"),
         ]:
             thread = getattr(self, thread_attr, None)
             worker = getattr(self, worker_attr, None)

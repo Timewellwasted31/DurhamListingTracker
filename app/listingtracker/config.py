@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from dataclasses import fields as dataclass_fields
 from typing import Any
 
 import yaml
@@ -13,18 +13,20 @@ from listingtracker.finance import FinanceConfig
 
 logger = logging.getLogger(__name__)
 
+_FC = FinanceConfig()
+
 DEFAULTS = {
-    "down_payment_available": 240_000,
-    "annual_income": 60_000,
-    "monthly_debt_obligations": 0,
-    "contract_rate": 0.04,
-    "amortization_years": 25,
-    "gds_limit": 0.39,
-    "tds_limit": 0.44,
-    "lender_heat_estimate": 100,
-    "hydro_estimate": 90,
-    "insurance_estimate": 40,
-    "first_time_buyer": False,
+    "down_payment_available": _FC.down_payment_available,
+    "annual_income": _FC.annual_income,
+    "monthly_debt_obligations": _FC.monthly_debt_obligations,
+    "contract_rate": _FC.contract_rate,
+    "amortization_years": _FC.amortization_years,
+    "gds_limit": _FC.gds_limit,
+    "tds_limit": _FC.tds_limit,
+    "lender_heat_estimate": _FC.lender_heat_estimate,
+    "hydro_estimate": _FC.hydro_estimate,
+    "insurance_estimate": _FC.insurance_estimate,
+    "first_time_buyer": _FC.first_time_buyer,
     "show_browser": False,
 }
 
@@ -48,17 +50,5 @@ def save_config(data: dict[str, Any]) -> None:
 
 
 def config_to_finance(cfg: dict[str, Any]) -> FinanceConfig:
-    return FinanceConfig(
-        down_payment_available=cfg.get("down_payment_available", 240_000),
-        down_payment_min=cfg.get("down_payment_min", 0),
-        annual_income=cfg.get("annual_income", 60_000),
-        monthly_debt_obligations=cfg.get("monthly_debt_obligations", 0),
-        contract_rate=cfg.get("contract_rate", 0.04),
-        amortization_years=cfg.get("amortization_years", 25),
-        gds_limit=cfg.get("gds_limit", 0.39),
-        tds_limit=cfg.get("tds_limit", 0.44),
-        lender_heat_estimate=cfg.get("lender_heat_estimate", 100),
-        hydro_estimate=cfg.get("hydro_estimate", 90),
-        insurance_estimate=cfg.get("insurance_estimate", 40),
-        first_time_buyer=cfg.get("first_time_buyer", False),
-    )
+    fc_fields = {f.name for f in dataclass_fields(FinanceConfig)}
+    return FinanceConfig(**{k: v for k, v in cfg.items() if k in fc_fields})

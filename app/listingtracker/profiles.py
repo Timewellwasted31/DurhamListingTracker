@@ -10,9 +10,12 @@ from typing import Optional
 
 import yaml
 
+from listingtracker.finance import FinanceConfig
 from listingtracker.paths import PROFILES_DIR, CONFIG_PATH
 
 logger = logging.getLogger(__name__)
+
+_FC = FinanceConfig()
 
 # (stored key, label shown in the UI)
 PROPERTY_TYPE_CHOICES = [
@@ -32,23 +35,23 @@ class BuyerProfile:
     employment_start: str = ""
     notes: str = ""
 
-    # --- Financial ---
-    annual_income: float = 60_000
-    down_payment_available: float = 240_000
+    # --- Financial (defaults from FinanceConfig) ---
+    annual_income: float = _FC.annual_income
+    down_payment_available: float = _FC.down_payment_available
     down_payment_target: float = 210_000
     liquid_reserve: float = 30_000
-    monthly_debt_obligations: float = 0
-    real_monthly_expenses: float = 600  # invisible to lenders but real
-    contract_rate: float = 0.04
-    amortization_years: int = 25
-    gds_limit: float = 0.39
-    tds_limit: float = 0.44
-    first_time_buyer: bool = False
+    monthly_debt_obligations: float = _FC.monthly_debt_obligations
+    real_monthly_expenses: float = 600
+    contract_rate: float = _FC.contract_rate
+    amortization_years: int = _FC.amortization_years
+    gds_limit: float = _FC.gds_limit
+    tds_limit: float = _FC.tds_limit
+    first_time_buyer: bool = _FC.first_time_buyer
 
-    # --- Utility estimates ---
-    lender_heat_estimate: float = 100
-    hydro_estimate: float = 90
-    insurance_estimate: float = 40
+    # --- Utility estimates (defaults from FinanceConfig) ---
+    lender_heat_estimate: float = _FC.lender_heat_estimate
+    hydro_estimate: float = _FC.hydro_estimate
+    insurance_estimate: float = _FC.insurance_estimate
 
     # --- Budget (general) ---
     price_min: float = 0  # kept for search URL compat; not shown in UI

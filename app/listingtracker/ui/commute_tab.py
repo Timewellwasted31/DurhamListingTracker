@@ -64,7 +64,7 @@ class CommuteTab(QWidget):
         layout.addStretch()
         self._show_map(None, None)
 
-        self._runner = GeoRunner(self)
+        self._runner = GeoRunner()
         self._runner.result.connect(self._on_summary)
         # Wait briefly so arrowing quickly through listings doesn't fire a lookup for each one
         self._delay = QTimer(self)

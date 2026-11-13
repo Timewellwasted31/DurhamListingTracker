@@ -16,6 +16,13 @@ from listingtracker.ui.map_widget import MapWidget, MapMarker, MapRoute, MapRegi
 HOME_COLOR = "#42a5f5"
 WORK_COLOR = "#ffa726"
 CITY_COLOR = "#66bb6a"
+CANDIDATE_COLOR = "#78909c"
+
+CANDIDATE_CITIES = [
+    "Ajax", "Brock", "Clarington", "Oshawa", "Pickering", "Scugog", "Uxbridge", "Whitby",
+    "Markham", "Toronto", "Kawartha Lakes", "Peterborough", "Cobourg", "Port Hope",
+]
+_CANDIDATE_SET = {c.lower() for c in CANDIDATE_CITIES}
 
 SECTION_LABEL = "color: #81d4fa; font-size: 12px; font-weight: bold; padding-top: 6px;"
 HINT_LABEL = "color: #888; font-size: 11px;"
@@ -33,15 +40,18 @@ class LocationEditor(QWidget):
         self._commute: Optional[geo.RouteInfo] = None
         self._pending_click: Optional[tuple[str, float, float]] = None
 
-        self._route_runner = GeoRunner(self)
+        self._route_runner = GeoRunner()
         self._route_runner.result.connect(self._on_commute)
-        self._click_runner = GeoRunner(self)
+        self._click_runner = GeoRunner()
         self._click_runner.result.connect(self._on_click_resolved)
-        self._city_runner = GeoRunner(self)
+        self._city_runner = GeoRunner()
         self._city_runner.result.connect(self._on_cities_located)
-        self._boundary_runner = GeoRunner(self)
+        self._boundary_runner = GeoRunner()
         self._boundary_runner.result.connect(self._on_boundaries_loaded)
-        self._warmup_runner = GeoRunner(self)
+        self._candidate_boundaries: dict[str, list[list[geo.Point]]] = {}
+        self._candidate_runner = GeoRunner()
+        self._candidate_runner.result.connect(self._on_candidates_loaded)
+        self._warmup_runner = GeoRunner()
         self._warmup_runner.submit(geo.warm_up)
 
         self._build_ui()
@@ -110,7 +120,7 @@ class LocationEditor(QWidget):
         city_row.addLayout(city_buttons)
         left.addLayout(city_row, 1)
 
-        self.status_label = QLabel("Tip: click the map to set a place or add the city at that spot.")
+        self.status_label = QLabel("Tip: hover over the map to see city areas, then click one to add it.")
         self.status_label.setStyleSheet(HINT_LABEL)
         self.status_label.setWordWrap(True)
         left.addWidget(self.status_label)
@@ -124,6 +134,7 @@ class LocationEditor(QWidget):
         self.map = MapWidget()
         self.map.setMinimumSize(360, 320)
         self.map.clicked.connect(self._on_map_clicked)
+        self.map.region_clicked.connect(self._on_region_clicked)
         root.addWidget(self.map, 1)
 
     # --- Load / save ---
@@ -150,6 +161,11 @@ class LocationEditor(QWidget):
 
         if profile.cities:
             self._boundary_runner.submit(geo.fetch_city_boundaries, list(profile.cities))
+
+        current = {c.lower() for c in profile.cities}
+        candidates = [c for c in CANDIDATE_CITIES if c.lower() not in current]
+        if candidates:
+            self._candidate_runner.submit(geo.fetch_city_boundaries, candidates)
 
         self._refresh_map(fit=True)
         self._update_commute()
@@ -213,6 +229,10 @@ class LocationEditor(QWidget):
         self.cities_list.addItem(name)
         if point:
             self._city_coords[name] = point
+        for key in list(self._candidate_boundaries):
+            if key.lower() == name.lower():
+                self._city_boundaries.setdefault(name, self._candidate_boundaries.pop(key))
+                break
         self.status_label.setText(f"Added {name}.")
         self._refresh_map(fit=True)
         self.changed.emit()
@@ -235,7 +255,9 @@ class LocationEditor(QWidget):
             return
         name = self.cities_list.takeItem(row).text()
         self._city_coords.pop(name, None)
-        self._city_boundaries.pop(name, None)
+        boundary = self._city_boundaries.pop(name, None)
+        if boundary and name.lower() in _CANDIDATE_SET:
+            self._candidate_boundaries[name] = boundary
         self._refresh_map(fit=False)
         self.changed.emit()
 
@@ -272,6 +294,31 @@ class LocationEditor(QWidget):
             self._city_boundaries[city] = boundary
         self._refresh_map(fit=True)
 
+    def _on_candidates_loaded(self, found) -> None:
+        if not found:
+            return
+        current = {c.lower() for c in self.cities()}
+        for city, boundary in found.items():
+            if city.lower() not in current:
+                self._candidate_boundaries[city] = boundary
+        self._refresh_map(fit=False)
+
+    def _on_region_clicked(self, label: str) -> None:
+        """User clicked a candidate region on the map."""
+        name = label
+        boundary = None
+        for key in self._candidate_boundaries:
+            if key.lower() == name.lower():
+                boundary = self._candidate_boundaries[key]
+                break
+        ring = (boundary[0] if boundary else [])
+        point = None
+        if ring:
+            point = (sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring))
+        self._add_city(name, point)
+        if not point:
+            self._city_runner.submit(geo.locate_cities, [name])
+
     # --- Map ---
 
     def _refresh_map(self, fit: bool) -> None:
@@ -292,6 +339,13 @@ class LocationEditor(QWidget):
             if boundary:
                 regions.append(MapRegion(rings=boundary, color=CITY_COLOR, label=city.title()))
         self.map.set_regions(regions)
+
+        current_cities = {c.lower() for c in self.cities()}
+        candidate_regions = []
+        for city, boundary in self._candidate_boundaries.items():
+            if city.lower() not in current_cities:
+                candidate_regions.append(MapRegion(rings=boundary, color=CANDIDATE_COLOR, label=city.title()))
+        self.map.set_candidate_regions(candidate_regions)
 
         routes = []
         if self._commute and self._home and self._work and not self._commute.estimated:

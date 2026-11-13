@@ -15,6 +15,8 @@ from typing import Optional
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
+from listingtracker.__version__ import __version__
+
 logger = logging.getLogger(__name__)
 
 # Per-site sitemap configuration
@@ -48,7 +50,7 @@ def _fetch_xml(url: str, timeout: int = 90) -> Optional[bytes]:
     """Fetch a sitemap URL and return raw bytes."""
     import urllib.request
     headers = {
-        "User-Agent": "DurhamListingTracker/1.0 (sitemap reader)",
+        "User-Agent": f"DurhamListingTracker/{__version__} (sitemap reader)",
         "Accept": "application/xml, text/xml, */*",
         "Accept-Encoding": "gzip",
     }

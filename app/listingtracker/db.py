@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import logging
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -83,9 +84,17 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
-def init_db() -> None:
+@contextmanager
+def _connect():
     conn = get_connection()
     try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def init_db() -> None:
+    with _connect() as conn:
         conn.executescript(SCHEMA_SQL)
 
         row = conn.execute(
@@ -113,8 +122,6 @@ def init_db() -> None:
                 conn.execute("UPDATE schema_version SET version = 3")
                 conn.commit()
                 logger.info("Migrated database to version 3")
-    finally:
-        conn.close()
 
 
 def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
@@ -153,8 +160,7 @@ def _seed_listings(conn: sqlite3.Connection) -> None:
 
 def add_listing(url: str, site: str) -> Optional[Listing]:
     url = normalize_url(url)
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         now = datetime.utcnow().isoformat()
         cursor = conn.execute(
             "INSERT OR IGNORE INTO listings (url, site, address, city, date_added) "
@@ -171,48 +177,36 @@ def add_listing(url: str, site: str) -> Optional[Listing]:
             date_added=datetime.fromisoformat(now),
         )
         return listing
-    finally:
-        conn.close()
 
 
 def get_all_listings(active_only: bool = True) -> list[Listing]:
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         query = "SELECT * FROM listings"
         if active_only:
             query += " WHERE active = 1"
         query += " ORDER BY date_added DESC"
         rows = conn.execute(query).fetchall()
         return [_row_to_listing(r) for r in rows]
-    finally:
-        conn.close()
 
 
 def get_listing_by_id(listing_id: int) -> Optional[Listing]:
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM listings WHERE id = ?", (listing_id,)
         ).fetchone()
         return _row_to_listing(row) if row else None
-    finally:
-        conn.close()
 
 
 def get_listing_by_url(url: str) -> Optional[Listing]:
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM listings WHERE url = ?", (url,)
         ).fetchone()
         return _row_to_listing(row) if row else None
-    finally:
-        conn.close()
 
 
 def update_listing(listing: Listing) -> None:
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         conn.execute(
             "UPDATE listings SET mls_number=?, address=?, unit=?, "
             "building_name=?, city=?, neighbourhood=?, active=?, user_notes=? "
@@ -230,13 +224,10 @@ def update_listing(listing: Listing) -> None:
             ),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def add_snapshot(snapshot: Snapshot) -> int:
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         cursor = conn.execute(
             "INSERT INTO snapshots "
             "(listing_id, fetched_at, status, list_price, maintenance_fee, "
@@ -277,8 +268,6 @@ def add_snapshot(snapshot: Snapshot) -> int:
         )
         conn.commit()
         return cursor.lastrowid
-    finally:
-        conn.close()
 
 
 _UPDATABLE_SNAPSHOT_FIELDS = {
@@ -297,31 +286,24 @@ def update_snapshot_fields(snapshot_id: int, fields: dict) -> None:
         return
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     values = list(updates.values()) + [snapshot_id]
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         conn.execute(f"UPDATE snapshots SET {set_clause} WHERE id = ?", values)
         conn.commit()
-    finally:
-        conn.close()
 
 
 def get_latest_snapshot(listing_id: int) -> Optional[Snapshot]:
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM snapshots WHERE listing_id = ? "
             "ORDER BY fetched_at DESC LIMIT 1",
             (listing_id,),
         ).fetchone()
         return _row_to_snapshot(row) if row else None
-    finally:
-        conn.close()
 
 
 def get_all_latest_snapshots() -> dict[int, Snapshot]:
     """Return {listing_id: latest_snapshot} for all listings in one query."""
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         rows = conn.execute(
             "SELECT s.* FROM snapshots s "
             "INNER JOIN ("
@@ -331,34 +313,26 @@ def get_all_latest_snapshots() -> dict[int, Snapshot]:
             "AND s.fetched_at = latest.max_ts"
         ).fetchall()
         return {r["listing_id"]: _row_to_snapshot(r) for r in rows}
-    finally:
-        conn.close()
 
 
 def get_previous_snapshot(listing_id: int) -> Optional[Snapshot]:
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         row = conn.execute(
             "SELECT * FROM snapshots WHERE listing_id = ? "
             "ORDER BY fetched_at DESC LIMIT 1 OFFSET 1",
             (listing_id,),
         ).fetchone()
         return _row_to_snapshot(row) if row else None
-    finally:
-        conn.close()
 
 
 def get_snapshots_for_listing(listing_id: int) -> list[Snapshot]:
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         rows = conn.execute(
             "SELECT * FROM snapshots WHERE listing_id = ? "
             "ORDER BY fetched_at ASC",
             (listing_id,),
         ).fetchall()
         return [_row_to_snapshot(r) for r in rows]
-    finally:
-        conn.close()
 
 
 def get_peer_stats(
@@ -373,8 +347,7 @@ def get_peer_stats(
     When city/beds/list_price/sqft are provided, they're used directly instead of
     re-querying the DB for data the caller already has.
     """
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         if not city or not beds or not list_price or not sqft:
             row = conn.execute(
                 "SELECT l.city FROM listings l WHERE l.id = ?", (listing_id,)
@@ -429,24 +402,18 @@ def get_peer_stats(
             "city": city,
             "beds": beds,
         }
-    finally:
-        conn.close()
 
 
 def delete_listing(listing_id: int) -> None:
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         conn.execute("DELETE FROM snapshots WHERE listing_id = ?", (listing_id,))
         conn.execute("DELETE FROM listings WHERE id = ?", (listing_id,))
         conn.commit()
-    finally:
-        conn.close()
 
 
 def cleanup_empty_listings() -> int:
     """Delete listings that have no address and no snapshots (failed fetches)."""
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         rows = conn.execute(
             "SELECT l.id FROM listings l "
             "LEFT JOIN snapshots s ON l.id = s.listing_id "
@@ -458,8 +425,6 @@ def cleanup_empty_listings() -> int:
             conn.execute(f"DELETE FROM listings WHERE id IN ({placeholders})", ids)
             conn.commit()
         return len(ids)
-    finally:
-        conn.close()
 
 
 def cleanup_bad_listings(after_fetch: bool = False) -> int:
@@ -469,12 +434,10 @@ def cleanup_bad_listings(after_fetch: bool = False) -> int:
     listings survive long enough to be fetched. Pass after_fetch=True to skip
     the grace period (used after a fetch pass when we know fetching was attempted).
     """
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         ids_to_delete = set()
 
         if after_fetch:
-            # No grace period — fetch was attempted, anything still empty is junk
             rows = conn.execute(
                 "SELECT l.id FROM listings l "
                 "LEFT JOIN snapshots s ON l.id = s.listing_id "
@@ -540,7 +503,6 @@ def cleanup_bad_listings(after_fetch: bool = False) -> int:
             conn.execute(
                 f"DELETE FROM listings WHERE id IN ({placeholders})", ids
             )
-            # Also normalize remaining URLs
             remaining = conn.execute("SELECT id, url FROM listings").fetchall()
             for r in remaining:
                 normed = normalize_url(r["url"])
@@ -551,8 +513,6 @@ def cleanup_bad_listings(after_fetch: bool = False) -> int:
                     )
             conn.commit()
         return len(ids)
-    finally:
-        conn.close()
 
 
 def cleanup_non_purchasable() -> int:
@@ -566,8 +526,7 @@ def cleanup_non_purchasable() -> int:
     Only targets listings with exactly one snapshot (freshly discovered).
     Listings with multiple snapshots (history) are kept.
     """
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         rows = conn.execute(
             "SELECT l.id FROM listings l "
             "JOIN snapshots s ON s.listing_id = l.id "
@@ -585,8 +544,6 @@ def cleanup_non_purchasable() -> int:
             conn.execute(f"DELETE FROM listings WHERE id IN ({ph})", ids)
             conn.commit()
         return len(ids)
-    finally:
-        conn.close()
 
 
 def normalize_url(url: str) -> str:
@@ -598,8 +555,7 @@ def normalize_url(url: str) -> str:
 
 
 def get_consecutive_blocked_count(listing_id: int) -> int:
-    conn = get_connection()
-    try:
+    with _connect() as conn:
         rows = conn.execute(
             "SELECT status FROM snapshots WHERE listing_id = ? "
             "ORDER BY fetched_at DESC LIMIT 3",
@@ -612,8 +568,6 @@ def get_consecutive_blocked_count(listing_id: int) -> int:
             else:
                 break
         return count
-    finally:
-        conn.close()
 
 
 def _row_to_listing(row: sqlite3.Row) -> Listing:
@@ -634,7 +588,6 @@ def _row_to_listing(row: sqlite3.Row) -> Listing:
 
 
 def _row_to_snapshot(row: sqlite3.Row) -> Snapshot:
-    # Text fields are cleaned on the way out: older snapshots can hold scraps of page code
     keys = row.keys()
     return Snapshot(
         id=row["id"],

@@ -8,11 +8,11 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QTabWidget,
     QDoubleSpinBox, QSpinBox, QCheckBox, QPushButton, QLabel,
     QGroupBox, QLineEdit, QTextEdit, QWidget,
-    QListWidget, QDateEdit,
+    QListWidget, QDateEdit, QMessageBox,
 )
 from PySide6.QtCore import QDate
 
-from listingtracker.profiles import BuyerProfile, PROPERTY_TYPE_CHOICES
+from listingtracker.profiles import BuyerProfile, PROPERTY_TYPE_CHOICES, profile_exists
 from listingtracker.ui.location_editor import LocationEditor
 
 DIALOG_STYLE = """
@@ -677,6 +677,18 @@ class ProfileDialog(QDialog):
         buttons.addWidget(save_btn)
         buttons.addWidget(cancel_btn)
         layout.addLayout(buttons)
+
+    def accept(self):
+        name = self.name_edit.text().strip() or "Default"
+        original = self.profile.name
+        if (self._new or name != original) and profile_exists(name):
+            QMessageBox.warning(
+                self, "Duplicate Name",
+                f'A profile named "{name}" already exists. Choose a different name.',
+            )
+            self.name_edit.setFocus()
+            return
+        super().accept()
 
     def _add_poi(self):
         text = self.poi_input.text().strip()
