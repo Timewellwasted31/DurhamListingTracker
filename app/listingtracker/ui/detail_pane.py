@@ -771,6 +771,10 @@ class DetailPane(QWidget):
             offer_tab = self._build_offer_tab(snap, listing.id, fee_includes, listing.city or "")
             self.tabs.addTab(offer_tab, "Offer")
 
+        if listing.favorited and snap.list_price:
+            comp_tab = self._build_comparables_tab(listing, snap)
+            self.tabs.addTab(comp_tab, "Comparables")
+
         if self._profile:
             self._commute_tab = CommuteTab(listing, self._profile)
             self._commute_tab.summary_ready.connect(self._show_commute_summary)
@@ -1584,6 +1588,122 @@ class DetailPane(QWidget):
             extras_grid.addWidget(vl, r, col + 1)
 
         self._offer_results_layout.addLayout(extras_grid)
+
+    def _build_comparables_tab(self, listing: Listing, snap: Snapshot) -> QWidget:
+        from listingtracker.db import (
+            get_comparables_for_favorite, get_latest_snapshot, get_snapshots_for_listing,
+        )
+        from listingtracker.comparables import PRICE_TOLERANCE
+
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        fav_price = snap.list_price or 0
+        comps = get_comparables_for_favorite(listing.id)
+
+        if not comps:
+            empty = QLabel(
+                "No comparable properties found yet.\n\n"
+                "Comparables are discovered during scheduled background checks.\n"
+                "Properties in the same city with similar beds/baths/sqft\n"
+                "but higher prices are tracked for price drops."
+            )
+            empty.setStyleSheet("color: #888; font-size: 12px; padding: 20px;")
+            empty.setWordWrap(True)
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(empty)
+            layout.addStretch()
+            return w
+
+        hdr = QLabel(f"Tracking {len(comps)} similar properties priced above ${fav_price:,.0f}")
+        hdr.setStyleSheet("color: #81d4fa; font-size: 13px; font-weight: bold; margin-bottom: 8px;")
+        hdr.setWordWrap(True)
+        layout.addWidget(hdr)
+
+        range_lbl = QLabel(f"Target range: ${fav_price - PRICE_TOLERANCE:,.0f} — ${fav_price + PRICE_TOLERANCE:,.0f}")
+        range_lbl.setStyleSheet("color: #aaa; font-size: 11px; margin-bottom: 12px;")
+        layout.addWidget(range_lbl)
+
+        for c in comps[:10]:
+            comp_snap = get_latest_snapshot(c["listing_id"])
+            if not comp_snap or not comp_snap.list_price:
+                continue
+
+            gap = comp_snap.list_price - fav_price
+            in_range = gap <= PRICE_TOLERANCE
+            trend = c.get("price_trend_pct_per_month")
+            predicted = c.get("predicted_target_date")
+
+            card = QFrame()
+            card.setStyleSheet(
+                f"QFrame {{ background: {'#1a3a1a' if in_range else '#1a1a2e'}; "
+                f"border: 1px solid {'#4caf50' if in_range else '#2d2d5e'}; "
+                f"border-radius: 8px; padding: 8px; margin-bottom: 4px; }}"
+            )
+            card_layout = QVBoxLayout(card)
+            card_layout.setSpacing(4)
+
+            # Address + score
+            addr = QLabel(f"{c['address']} — {c['city']}")
+            addr.setStyleSheet("color: #fff; font-size: 13px; font-weight: bold;")
+            addr.setWordWrap(True)
+            card_layout.addWidget(addr)
+
+            # Price row
+            price_txt = f"${comp_snap.list_price:,.0f}"
+            gap_txt = f"+${gap:,.0f}" if gap > 0 else f"${gap:,.0f}"
+            if in_range:
+                gap_txt = "IN RANGE!"
+                gap_color = "#4caf50"
+            elif gap <= PRICE_TOLERANCE * 2:
+                gap_color = "#ffd54f"
+            else:
+                gap_color = "#ef5350"
+
+            price_row = QHBoxLayout()
+            pl = QLabel(price_txt)
+            pl.setStyleSheet("color: #6c63ff; font-size: 14px; font-weight: bold;")
+            price_row.addWidget(pl)
+            gl = QLabel(gap_txt)
+            gl.setStyleSheet(f"color: {gap_color}; font-size: 12px; font-weight: bold;")
+            price_row.addWidget(gl)
+
+            score_l = QLabel(f"Match: {c['similarity_score']:.0f}%")
+            score_l.setStyleSheet("color: #888; font-size: 11px;")
+            score_l.setAlignment(Qt.AlignmentFlag.AlignRight)
+            price_row.addWidget(score_l)
+            card_layout.addLayout(price_row)
+
+            # Specs row
+            specs = []
+            if comp_snap.beds:
+                specs.append(f"{comp_snap.beds} bd")
+            if comp_snap.baths:
+                specs.append(f"{comp_snap.baths} ba")
+            sf = comp_snap.sqft_max or comp_snap.sqft_min
+            if sf:
+                specs.append(f"{sf:,} sqft")
+            if specs:
+                spec_l = QLabel(" · ".join(specs))
+                spec_l.setStyleSheet("color: #aaa; font-size: 11px;")
+                card_layout.addWidget(spec_l)
+
+            # Trend + prediction
+            if trend is not None:
+                arrow = "↓" if trend < 0 else "↑"
+                trend_color = "#4caf50" if trend < 0 else "#ef5350"
+                trend_txt = f"{arrow} {abs(trend):.1f}%/month"
+                if predicted:
+                    trend_txt += f"  —  Est. target: {predicted}"
+                trend_l = QLabel(trend_txt)
+                trend_l.setStyleSheet(f"color: {trend_color}; font-size: 11px;")
+                card_layout.addWidget(trend_l)
+
+            layout.addWidget(card)
+
+        layout.addStretch()
+        return w
 
     # --- Helpers ---
 

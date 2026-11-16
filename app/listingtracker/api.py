@@ -237,6 +237,64 @@ async def toggle_favorite(listing_id: int, _=Depends(verify_api_key)):
     return {"listing_id": listing_id, "favorited": new_state}
 
 
+@app.get("/api/listings/{listing_id}/comparables")
+async def get_comparables(listing_id: int, _=Depends(verify_api_key)):
+    from listingtracker.db import (
+        get_listing_by_id, get_comparables_for_favorite, get_latest_snapshot,
+        get_snapshots_for_listing,
+    )
+    from listingtracker.comparables import analyze_price_trend, predict_target_date, PRICE_TOLERANCE
+
+    lst = get_listing_by_id(listing_id)
+    if not lst:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    if not lst.favorited:
+        return {"comparables": [], "message": "Only favorited listings have comparables"}
+
+    fav_snap = get_latest_snapshot(listing_id)
+    fav_price = fav_snap.list_price if fav_snap else 0
+
+    comps = get_comparables_for_favorite(listing_id)
+    result = []
+    for c in comps:
+        comp_snap = get_latest_snapshot(c["listing_id"])
+        if not comp_snap or not comp_snap.list_price:
+            continue
+
+        history = get_snapshots_for_listing(c["listing_id"])
+        trend = c.get("price_trend_pct_per_month")
+        predicted = c.get("predicted_target_date")
+
+        price_history = [
+            {"date": s.fetched_at, "price": s.list_price}
+            for s in history if s.list_price and s.list_price > 0
+        ]
+
+        gap = comp_snap.list_price - fav_price if fav_price else 0
+        in_range = gap <= PRICE_TOLERANCE
+
+        result.append({
+            "listing_id": c["listing_id"],
+            "address": c["address"],
+            "city": c["city"],
+            "url": c["url"],
+            "similarity_score": c["similarity_score"],
+            "current_price": comp_snap.list_price,
+            "favorite_price": fav_price,
+            "price_gap": gap,
+            "in_range": in_range,
+            "beds": comp_snap.beds,
+            "baths": comp_snap.baths,
+            "sqft": comp_snap.sqft_max or comp_snap.sqft_min,
+            "trend_pct_month": trend,
+            "predicted_target_date": predicted,
+            "notes": c.get("notes", ""),
+            "price_history": price_history,
+        })
+
+    return {"comparables": result, "favorite_price": fav_price, "tolerance": PRICE_TOLERANCE}
+
+
 @app.get("/api/images/{listing_id}")
 async def listing_images(listing_id: int, _=Depends(verify_api_key)):
     from listingtracker.db import get_listing_images
@@ -304,6 +362,63 @@ async def stats(_=Depends(verify_api_key)):
             "count": len(prices),
         },
     }
+
+
+@app.post("/api/scan-comparables")
+async def scan_comparables(_=Depends(verify_api_key)):
+    """Trigger a comparable property scan for all favorites."""
+    from listingtracker.db import (
+        get_favorited_listings, get_all_listings, get_all_latest_snapshots,
+        get_latest_snapshot, get_snapshots_for_listing, upsert_comparable,
+        delete_stale_comparables,
+    )
+    from listingtracker.comparables import (
+        find_comparables_for_favorite, analyze_price_trend, predict_target_date,
+        PRICE_TOLERANCE,
+    )
+
+    favorites = get_favorited_listings()
+    if not favorites:
+        return {"message": "No favorites to scan", "count": 0}
+
+    all_listings = get_all_listings(active_only=True)
+    all_snapshots = get_all_latest_snapshots()
+
+    total = 0
+    for fav in favorites:
+        fav_snap = all_snapshots.get(fav.id) or get_latest_snapshot(fav.id)
+        if not fav_snap or not fav_snap.list_price:
+            continue
+
+        matches = find_comparables_for_favorite(fav, fav_snap, all_listings, all_snapshots)
+        for listing_id, score in matches:
+            comp_snap = all_snapshots.get(listing_id)
+            if not comp_snap:
+                continue
+
+            history = get_snapshots_for_listing(listing_id)
+            trend = analyze_price_trend(history)
+            predicted = None
+            notes = ""
+
+            if trend is not None and trend < 0:
+                predicted = predict_target_date(
+                    comp_snap.list_price, fav_snap.list_price, trend, PRICE_TOLERANCE,
+                )
+                if predicted:
+                    notes = f"Dropping ~{abs(trend):.1f}%/mo, may reach target by {predicted}"
+
+            gap = comp_snap.list_price - fav_snap.list_price
+            if gap <= PRICE_TOLERANCE:
+                notes = f"IN RANGE! Gap: ${gap:,.0f}"
+
+            upsert_comparable(fav.id, listing_id, score,
+                              predicted_target_date=predicted,
+                              price_trend_pct_per_month=trend, notes=notes)
+            total += 1
+
+    stale = delete_stale_comparables()
+    return {"message": f"Found {total} comparables across {len(favorites)} favorites", "count": total, "stale_removed": stale}
 
 
 @app.get("/api/key-check")

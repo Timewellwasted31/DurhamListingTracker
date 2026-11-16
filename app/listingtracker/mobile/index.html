@@ -317,6 +317,36 @@ body {
   margin-top: 20px;
 }
 
+/* ---------- Comparable cards ---------- */
+.comp-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 8px;
+}
+.comp-card.in-range {
+  background: rgba(76,175,80,.08);
+  border-color: var(--green);
+}
+.comp-addr { font-size: 13px; font-weight: 600; color: var(--text); }
+.comp-price-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.comp-price { font-size: 15px; font-weight: 700; color: var(--accent); }
+.comp-gap { font-size: 12px; font-weight: 600; }
+.comp-gap.near { color: var(--gold); }
+.comp-gap.far { color: var(--red); }
+.comp-gap.hit { color: var(--green); }
+.comp-specs { font-size: 11px; color: var(--text2); margin-top: 2px; }
+.comp-trend { font-size: 11px; margin-top: 4px; }
+.comp-trend.down { color: var(--green); }
+.comp-trend.up { color: var(--red); }
+.comp-score { font-size: 11px; color: var(--text2); margin-left: auto; }
+.comp-scan-btn {
+  display: block; width: 100%; padding: 10px; margin-top: 12px;
+  background: var(--surface2); color: var(--accent2); border: 1px solid var(--border);
+  border-radius: var(--radius); font-size: 13px; font-weight: 600; cursor: pointer;
+}
+
 /* ---------- Login screen ---------- */
 .login-screen {
   display: flex;
@@ -818,9 +848,92 @@ function renderDetail() {
       ${feeHtml}
       ${historyHtml}
 
+      ${d.favorited ? '<div id="compSection"></div>' : ''}
+
       <a class="detail-link" href="${escHtml(d.url)}" target="_blank" rel="noopener">View on ${escHtml(d.site)}</a>
     </div>
   `;
+
+  if (d.favorited) loadComparables(d.id);
+}
+
+async function loadComparables(listingId) {
+  const el = document.getElementById('compSection');
+  if (!el) return;
+  el.innerHTML = '<div class="section-title">Comparable Properties</div><div style="color:var(--text2);font-size:12px">Loading...</div>';
+
+  try {
+    const data = await apiFetch(`/api/listings/${listingId}/comparables`);
+    renderComparables(el, data);
+  } catch(e) {
+    el.innerHTML = '<div class="section-title">Comparable Properties</div><div style="color:var(--text2);font-size:12px">Could not load comparables</div>';
+  }
+}
+
+function renderComparables(el, data) {
+  const comps = data.comparables || [];
+  const favPrice = data.favorite_price || 0;
+  const tol = data.tolerance || 25000;
+
+  if (!comps.length) {
+    el.innerHTML = `
+      <div class="section-title">Comparable Properties</div>
+      <div style="color:var(--text2);font-size:12px;padding:12px 0">
+        No comparables found yet. Similar properties priced above yours are
+        discovered during scheduled checks.
+        <button class="comp-scan-btn" onclick="scanComparables()">Scan Now</button>
+      </div>`;
+    return;
+  }
+
+  let html = `<div class="section-title">Comparable Properties (${comps.length})</div>`;
+  html += `<div style="color:var(--text2);font-size:11px;margin-bottom:8px">Target: $${(favPrice-tol).toLocaleString()} &mdash; $${(favPrice+tol).toLocaleString()}</div>`;
+
+  for (const c of comps.slice(0, 10)) {
+    const inRange = c.in_range;
+    const gap = c.price_gap;
+    let gapTxt, gapClass;
+    if (inRange) { gapTxt = 'IN RANGE!'; gapClass = 'hit'; }
+    else if (gap <= tol * 2) { gapTxt = '+$' + gap.toLocaleString(); gapClass = 'near'; }
+    else { gapTxt = '+$' + gap.toLocaleString(); gapClass = 'far'; }
+
+    const specs = [c.beds ? c.beds + ' bd' : '', c.baths ? c.baths + ' ba' : '', c.sqft ? c.sqft.toLocaleString() + ' sqft' : ''].filter(Boolean).join(' · ');
+
+    let trendHtml = '';
+    if (c.trend_pct_month != null) {
+      const arrow = c.trend_pct_month < 0 ? '&#x2193;' : '&#x2191;';
+      const cls = c.trend_pct_month < 0 ? 'down' : 'up';
+      trendHtml = `<div class="comp-trend ${cls}">${arrow} ${Math.abs(c.trend_pct_month).toFixed(1)}%/mo`;
+      if (c.predicted_target_date) trendHtml += ` &mdash; Est. target: ${c.predicted_target_date}`;
+      trendHtml += '</div>';
+    }
+
+    html += `
+      <div class="comp-card ${inRange ? 'in-range' : ''}" onclick="openDetail(${c.listing_id})">
+        <div class="comp-addr">${escHtml(c.address)} &mdash; ${escHtml(c.city)}</div>
+        <div class="comp-price-row">
+          <span class="comp-price">$${c.current_price.toLocaleString()}</span>
+          <span class="comp-gap ${gapClass}">${gapTxt}</span>
+          <span class="comp-score">Match: ${Math.round(c.similarity_score)}%</span>
+        </div>
+        ${specs ? `<div class="comp-specs">${specs}</div>` : ''}
+        ${trendHtml}
+      </div>`;
+  }
+
+  html += '<button class="comp-scan-btn" onclick="scanComparables()">Rescan Comparables</button>';
+  el.innerHTML = html;
+}
+
+async function scanComparables() {
+  try {
+    const btn = document.querySelector('.comp-scan-btn');
+    if (btn) { btn.textContent = 'Scanning...'; btn.disabled = true; }
+    await apiFetch('/api/scan-comparables', { method: 'POST' });
+    if (currentDetailId) loadComparables(currentDetailId);
+  } catch(e) {
+    alert('Scan failed: ' + e.message);
+  }
 }
 
 function updateDetailFavBtn() {

@@ -14,7 +14,7 @@ from listingtracker.adapters.base import clean_text
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -81,6 +81,21 @@ CREATE TABLE IF NOT EXISTS listing_images (
 );
 
 CREATE INDEX IF NOT EXISTS idx_listing_images_listing ON listing_images(listing_id, position);
+
+CREATE TABLE IF NOT EXISTS comparables (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    favorite_id INTEGER NOT NULL REFERENCES listings(id),
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    similarity_score REAL NOT NULL DEFAULT 0,
+    first_seen TEXT NOT NULL,
+    last_checked TEXT,
+    predicted_target_date TEXT,
+    price_trend_pct_per_month REAL,
+    notes TEXT NOT NULL DEFAULT '',
+    UNIQUE(favorite_id, listing_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_comparables_favorite ON comparables(favorite_id);
 """
 
 SEED_URLS = [
@@ -147,6 +162,12 @@ def init_db() -> None:
                 conn.execute("UPDATE schema_version SET version = 5")
                 conn.commit()
                 logger.info("Migrated database to version 5")
+                current = 5
+            if current < 6:
+                _migrate_v5_to_v6(conn)
+                conn.execute("UPDATE schema_version SET version = 6")
+                conn.commit()
+                logger.info("Migrated database to version 6")
 
 
 def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
@@ -187,6 +208,25 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
     existing = {r[1] for r in conn.execute("PRAGMA table_info(listings)").fetchall()}
     if "favorited" not in existing:
         conn.execute("ALTER TABLE listings ADD COLUMN favorited INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+
+
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS comparables (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            favorite_id INTEGER NOT NULL REFERENCES listings(id),
+            listing_id INTEGER NOT NULL REFERENCES listings(id),
+            similarity_score REAL NOT NULL DEFAULT 0,
+            first_seen TEXT NOT NULL,
+            last_checked TEXT,
+            predicted_target_date TEXT,
+            price_trend_pct_per_month REAL,
+            notes TEXT NOT NULL DEFAULT '',
+            UNIQUE(favorite_id, listing_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_comparables_favorite ON comparables(favorite_id);
+    """)
     conn.commit()
 
 
@@ -631,6 +671,66 @@ def get_consecutive_blocked_count(listing_id: int) -> int:
             else:
                 break
         return count
+
+
+def upsert_comparable(
+    favorite_id: int, listing_id: int, similarity_score: float,
+    predicted_target_date: Optional[str] = None,
+    price_trend_pct_per_month: Optional[float] = None,
+    notes: str = "",
+) -> int:
+    with _connect() as conn:
+        now = datetime.utcnow().isoformat()
+        cursor = conn.execute(
+            "INSERT INTO comparables "
+            "(favorite_id, listing_id, similarity_score, first_seen, last_checked, "
+            "predicted_target_date, price_trend_pct_per_month, notes) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(favorite_id, listing_id) DO UPDATE SET "
+            "similarity_score = excluded.similarity_score, "
+            "last_checked = excluded.last_checked, "
+            "predicted_target_date = excluded.predicted_target_date, "
+            "price_trend_pct_per_month = excluded.price_trend_pct_per_month, "
+            "notes = excluded.notes",
+            (favorite_id, listing_id, similarity_score, now, now,
+             predicted_target_date, price_trend_pct_per_month, notes),
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_comparables_for_favorite(favorite_id: int) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT c.*, l.address, l.city, l.url, l.site "
+            "FROM comparables c "
+            "JOIN listings l ON l.id = c.listing_id "
+            "WHERE c.favorite_id = ? AND l.active = 1 "
+            "ORDER BY c.similarity_score DESC",
+            (favorite_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_comparables_for_favorite(favorite_id: int) -> int:
+    with _connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM comparables WHERE favorite_id = ?", (favorite_id,)
+        )
+        conn.commit()
+        return cursor.rowcount
+
+
+def delete_stale_comparables() -> int:
+    """Remove comparables where the favorite is no longer favorited or the comp is inactive."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "DELETE FROM comparables WHERE "
+            "favorite_id NOT IN (SELECT id FROM listings WHERE favorited = 1) "
+            "OR listing_id NOT IN (SELECT id FROM listings WHERE active = 1)"
+        )
+        conn.commit()
+        return cursor.rowcount
 
 
 def _row_to_listing(row: sqlite3.Row) -> Listing:
