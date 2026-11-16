@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#1a1a2e">
+<title>Durham Listings</title>
+<link rel="manifest" href="/manifest.json">
+<style>
+:root {
+  --bg: #0f0f1a;
+  --surface: #1a1a2e;
+  --surface2: #242444;
+  --border: #2d2d5e;
+  --text: #e8e8f0;
+  --text2: #9898b8;
+  --accent: #6c63ff;
+  --accent2: #8b83ff;
+  --green: #4caf50;
+  --red: #ef5350;
+  --gold: #ffd54f;
+  --orange: #ff9800;
+  --radius: 12px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100dvh;
+  overflow-x: hidden;
+}
+
+/* ---------- Header ---------- */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: var(--safe-top) 16px 0 16px;
+}
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+}
+.header h1 {
+  font-size: 18px;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.header-actions { display: flex; gap: 8px; }
+.icon-btn {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text2);
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  cursor: pointer;
+}
+.icon-btn.active { color: var(--gold); border-color: var(--gold); }
+
+/* Filter chips */
+.filters {
+  display: flex;
+  gap: 8px;
+  padding: 8px 0 12px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.filters::-webkit-scrollbar { display: none; }
+.chip {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text2);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .15s;
+}
+.chip.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+/* ---------- Stats bar ---------- */
+.stats-bar {
+  display: flex;
+  gap: 12px;
+  padding: 12px 16px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.stats-bar::-webkit-scrollbar { display: none; }
+.stat-card {
+  flex-shrink: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  min-width: 120px;
+  text-align: center;
+}
+.stat-card .value { font-size: 22px; font-weight: 700; color: var(--accent2); }
+.stat-card .label { font-size: 11px; color: var(--text2); margin-top: 2px; text-transform: uppercase; letter-spacing: .5px; }
+
+/* ---------- Listing cards ---------- */
+.listings { padding: 0 16px 100px; }
+.listing-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform .12s, border-color .12s;
+}
+.listing-card:active { transform: scale(0.98); }
+.listing-card .card-image {
+  width: 100%;
+  height: 180px;
+  object-fit: cover;
+  background: var(--surface2);
+  display: block;
+}
+.listing-card .card-image.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 40px;
+  color: var(--text2);
+}
+.card-body { padding: 12px; }
+.card-top { display: flex; justify-content: space-between; align-items: flex-start; }
+.card-address { font-size: 15px; font-weight: 600; line-height: 1.3; flex: 1; }
+.card-fav {
+  font-size: 20px;
+  color: var(--text2);
+  cursor: pointer;
+  padding: 4px;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+}
+.card-fav.active { color: var(--gold); }
+.card-meta { display: flex; gap: 12px; margin-top: 6px; color: var(--text2); font-size: 13px; }
+.card-price {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--green);
+  margin-top: 8px;
+}
+.card-price.sold { color: var(--red); }
+.card-badges { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.badge {
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--surface2);
+  color: var(--text2);
+}
+.badge.for-sale { background: rgba(76,175,80,.15); color: var(--green); }
+.badge.sold { background: rgba(239,83,80,.15); color: var(--red); }
+.badge.conditional { background: rgba(255,152,0,.15); color: var(--orange); }
+
+/* ---------- Detail overlay ---------- */
+.detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: var(--bg);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  transform: translateX(100%);
+  transition: transform .25s ease;
+}
+.detail-overlay.open { transform: translateX(0); }
+.detail-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: calc(var(--safe-top) + 12px) 16px 12px;
+}
+.back-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 24px;
+  cursor: pointer;
+  padding: 4px;
+}
+.detail-title { font-size: 16px; font-weight: 600; flex: 1; }
+.detail-fav-btn {
+  font-size: 24px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.detail-gallery {
+  position: relative;
+  width: 100%;
+  height: 260px;
+  overflow: hidden;
+  background: var(--surface2);
+}
+.detail-gallery img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.gallery-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(0,0,0,.5);
+  color: #fff;
+  border: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  font-size: 18px;
+  cursor: pointer;
+}
+.gallery-nav.prev { left: 8px; }
+.gallery-nav.next { right: 8px; }
+.gallery-counter {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  background: rgba(0,0,0,.6);
+  color: #fff;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+.detail-content { padding: 16px; padding-bottom: calc(var(--safe-bottom) + 80px); }
+.detail-price { font-size: 28px; font-weight: 700; color: var(--green); }
+.detail-price.sold { color: var(--red); }
+.detail-status-badge { display: inline-block; margin-left: 8px; vertical-align: middle; }
+
+.info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 16px;
+}
+.info-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.info-item .info-label { font-size: 11px; color: var(--text2); text-transform: uppercase; letter-spacing: .5px; }
+.info-item .info-value { font-size: 15px; font-weight: 600; margin-top: 2px; }
+
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  margin-top: 24px;
+  margin-bottom: 12px;
+}
+
+.history-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+}
+.history-date { font-size: 13px; color: var(--text2); }
+.history-price { font-size: 15px; font-weight: 600; }
+
+.detail-link {
+  display: block;
+  text-align: center;
+  background: var(--accent);
+  color: #fff;
+  padding: 14px;
+  border-radius: var(--radius);
+  font-weight: 600;
+  text-decoration: none;
+  margin-top: 20px;
+}
+
+/* ---------- Login screen ---------- */
+.login-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: 32px;
+}
+.login-screen h1 {
+  font-size: 24px;
+  margin-bottom: 8px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.login-screen p { color: var(--text2); margin-bottom: 24px; font-size: 14px; text-align: center; }
+.login-screen input {
+  width: 100%;
+  max-width: 340px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 15px;
+  margin-bottom: 12px;
+}
+.login-screen input::placeholder { color: var(--text2); }
+.login-screen button {
+  width: 100%;
+  max-width: 340px;
+  padding: 14px;
+  border-radius: var(--radius);
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.login-screen .error { color: var(--red); font-size: 13px; margin-top: 8px; }
+
+/* ---------- Loading / empty ---------- */
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  color: var(--text2);
+  font-size: 14px;
+}
+.spinner {
+  width: 24px;
+  height: 24px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+  margin-right: 10px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.empty-state { text-align: center; padding: 60px 20px; color: var(--text2); }
+.empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+
+/* Sort dropdown */
+.sort-select {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+/* Pull to refresh indicator */
+.pull-indicator {
+  text-align: center;
+  padding: 12px;
+  color: var(--text2);
+  font-size: 13px;
+  display: none;
+}
+.pull-indicator.visible { display: block; }
+</style>
+</head>
+<body>
+
+<!-- Login Screen -->
+<div id="loginScreen" class="login-screen">
+  <h1>Durham Listings</h1>
+  <p>Enter your API key to connect<br>to your listing tracker</p>
+  <input type="text" id="serverUrl" placeholder="Server URL (e.g. http://192.168.1.10:8000)">
+  <input type="password" id="apiKeyInput" placeholder="API Key">
+  <button onclick="doLogin()">Connect</button>
+  <div id="loginError" class="error" style="display:none"></div>
+</div>
+
+<!-- Main App -->
+<div id="mainApp" style="display:none">
+  <div class="header">
+    <div class="header-top">
+      <h1>Durham Listings</h1>
+      <div class="header-actions">
+        <select class="sort-select" id="sortSelect" onchange="changeSort()">
+          <option value="date">Newest</option>
+          <option value="price">Price: Low</option>
+          <option value="price_desc">Price: High</option>
+          <option value="city">City</option>
+        </select>
+        <button class="icon-btn" id="favFilterBtn" onclick="toggleFavFilter()" title="Favorites only">&#9733;</button>
+        <button class="icon-btn" onclick="refreshListings()" title="Refresh">&#x21bb;</button>
+      </div>
+    </div>
+    <div class="filters" id="cityFilters"></div>
+  </div>
+
+  <div class="stats-bar" id="statsBar"></div>
+  <div class="pull-indicator" id="pullIndicator">Pull down to refresh...</div>
+  <div class="listings" id="listingsContainer">
+    <div class="loading"><div class="spinner"></div> Loading listings...</div>
+  </div>
+</div>
+
+<!-- Detail Overlay -->
+<div class="detail-overlay" id="detailOverlay">
+  <div class="detail-header">
+    <button class="back-btn" onclick="closeDetail()">&#8592;</button>
+    <div class="detail-title" id="detailTitle"></div>
+    <button class="detail-fav-btn" id="detailFavBtn" onclick="toggleDetailFav()">&#9734;</button>
+  </div>
+  <div id="detailContent"></div>
+</div>
+
+<script>
+const API_TIMEOUT = 15000;
+let serverUrl = '';
+let apiKey = '';
+let listings = [];
+let currentFilter = { city: null, favOnly: false, sort: 'date' };
+let currentDetailId = null;
+let currentGalleryIndex = 0;
+let detailData = null;
+
+// ------ Persistence ------
+function saveCredentials() {
+  try {
+    localStorage.setItem('lt_server', serverUrl);
+    localStorage.setItem('lt_key', apiKey);
+  } catch(e) {}
+}
+function loadCredentials() {
+  try {
+    serverUrl = localStorage.getItem('lt_server') || '';
+    apiKey = localStorage.getItem('lt_key') || '';
+  } catch(e) {}
+}
+
+// ------ API calls ------
+async function apiFetch(path, opts = {}) {
+  const url = serverUrl.replace(/\/+$/, '') + path;
+  const sep = path.includes('?') ? '&' : '?';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT);
+  try {
+    const resp = await fetch(url + sep + 'key=' + encodeURIComponent(apiKey), {
+      signal: controller.signal,
+      ...opts,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ------ Login ------
+async function doLogin() {
+  const urlInput = document.getElementById('serverUrl');
+  const keyInput = document.getElementById('apiKeyInput');
+  const errEl = document.getElementById('loginError');
+  errEl.style.display = 'none';
+
+  serverUrl = urlInput.value.trim();
+  apiKey = keyInput.value.trim();
+
+  if (!serverUrl || !apiKey) {
+    errEl.textContent = 'Please fill in both fields';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  try {
+    await apiFetch('/api/key-check');
+    saveCredentials();
+    showMainApp();
+  } catch(e) {
+    errEl.textContent = 'Connection failed. Check URL and API key.';
+    errEl.style.display = 'block';
+  }
+}
+
+function showMainApp() {
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('mainApp').style.display = 'block';
+  loadStats();
+  loadListings();
+}
+
+// ------ Stats ------
+async function loadStats() {
+  try {
+    const data = await apiFetch('/api/stats');
+    const bar = document.getElementById('statsBar');
+    bar.innerHTML = `
+      <div class="stat-card">
+        <div class="value">${data.total_listings}</div>
+        <div class="label">Listings</div>
+      </div>
+      <div class="stat-card">
+        <div class="value">${data.total_favorited}</div>
+        <div class="label">Favorites</div>
+      </div>
+      <div class="stat-card">
+        <div class="value">${data.price_stats.count > 0 ? '$' + Math.round(data.price_stats.average / 1000) + 'k' : '-'}</div>
+        <div class="label">Avg Price</div>
+      </div>
+      <div class="stat-card">
+        <div class="value">${data.price_stats.count > 0 ? '$' + Math.round(data.price_stats.min / 1000) + 'k' : '-'}</div>
+        <div class="label">Lowest</div>
+      </div>
+    `;
+
+    // City filter chips
+    const cities = Object.keys(data.cities);
+    const filtersEl = document.getElementById('cityFilters');
+    filtersEl.innerHTML = '<div class="chip active" onclick="filterCity(null, this)">All</div>' +
+      cities.map(c => `<div class="chip" onclick="filterCity('${c}', this)">${c} (${data.cities[c]})</div>`).join('');
+  } catch(e) {
+    console.error('Stats load failed:', e);
+  }
+}
+
+// ------ Listings ------
+async function loadListings() {
+  const container = document.getElementById('listingsContainer');
+  container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading listings...</div>';
+
+  try {
+    let path = '/api/listings?sort=' + currentFilter.sort;
+    if (currentFilter.favOnly) path += '&favorites_only=true';
+    if (currentFilter.city) path += '&city=' + encodeURIComponent(currentFilter.city);
+
+    const data = await apiFetch(path);
+    listings = data.listings;
+    renderListings();
+  } catch(e) {
+    container.innerHTML = '<div class="empty-state"><div class="icon">&#x26A0;</div><p>Failed to load listings</p></div>';
+  }
+}
+
+function renderListings() {
+  const container = document.getElementById('listingsContainer');
+  if (listings.length === 0) {
+    container.innerHTML = '<div class="empty-state"><div class="icon">&#x1F3E0;</div><p>No listings found</p></div>';
+    return;
+  }
+
+  container.innerHTML = listings.map(l => {
+    const snap = l.snapshot || {};
+    const price = snap.list_price ? formatPrice(snap.list_price) : 'No price';
+    const status = snap.status || 'UNKNOWN';
+    const isSold = ['SOLD', 'SOLD_CONDITIONAL', 'TERMINATED'].includes(status);
+    const statusClass = status === 'FOR_SALE' ? 'for-sale' : (isSold ? 'sold' : '');
+    const statusLabel = formatStatus(status);
+    const beds = snap.beds ? snap.beds + ' bd' : '';
+    const baths = snap.baths ? snap.baths + ' ba' : '';
+    const sqft = snap.sqft_max || snap.sqft_min;
+    const sqftStr = sqft ? sqft.toLocaleString() + ' sqft' : '';
+    const meta = [beds, baths, sqftStr].filter(Boolean).join(' &middot; ');
+
+    const imgHtml = l.image_url
+      ? `<img class="card-image" src="${escHtml(l.image_url)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=\\'card-image placeholder\\'>&#x1F3E0;</div>'">`
+      : '<div class="card-image placeholder">&#x1F3E0;</div>';
+
+    return `
+      <div class="listing-card" onclick="openDetail(${l.id})">
+        ${imgHtml}
+        <div class="card-body">
+          <div class="card-top">
+            <div class="card-address">${escHtml(l.address)}${l.unit ? ' #' + escHtml(l.unit) : ''}</div>
+            <button class="card-fav ${l.favorited ? 'active' : ''}" onclick="event.stopPropagation(); toggleFav(${l.id})">${l.favorited ? '&#9733;' : '&#9734;'}</button>
+          </div>
+          <div class="card-meta">${meta || l.city || l.site}</div>
+          <div class="card-price ${isSold ? 'sold' : ''}">${price}</div>
+          <div class="card-badges">
+            <span class="badge ${statusClass}">${statusLabel}</span>
+            ${l.city ? `<span class="badge">${escHtml(l.city)}</span>` : ''}
+            ${snap.property_type ? `<span class="badge">${escHtml(snap.property_type)}</span>` : ''}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function refreshListings() {
+  await Promise.all([loadStats(), loadListings()]);
+}
+
+// ------ Filters ------
+function filterCity(city, el) {
+  currentFilter.city = city;
+  document.querySelectorAll('.filters .chip').forEach(c => c.classList.remove('active'));
+  if (el) el.classList.add('active');
+  loadListings();
+}
+
+function toggleFavFilter() {
+  currentFilter.favOnly = !currentFilter.favOnly;
+  document.getElementById('favFilterBtn').classList.toggle('active', currentFilter.favOnly);
+  loadListings();
+}
+
+function changeSort() {
+  currentFilter.sort = document.getElementById('sortSelect').value;
+  loadListings();
+}
+
+// ------ Favorites ------
+async function toggleFav(id) {
+  try {
+    const resp = await apiFetch(`/api/listings/${id}/favorite`, { method: 'POST' });
+    const card = listings.find(l => l.id === id);
+    if (card) card.favorited = resp.favorited;
+    renderListings();
+    if (currentDetailId === id && detailData) {
+      detailData.favorited = resp.favorited;
+      updateDetailFavBtn();
+    }
+  } catch(e) {
+    console.error('Toggle favorite failed:', e);
+  }
+}
+
+// ------ Detail view ------
+async function openDetail(id) {
+  currentDetailId = id;
+  const overlay = document.getElementById('detailOverlay');
+  const content = document.getElementById('detailContent');
+  const title = document.getElementById('detailTitle');
+
+  content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
+  title.textContent = 'Loading...';
+  overlay.classList.add('open');
+  document.body.style.overflow = 'hidden';
+
+  try {
+    detailData = await apiFetch(`/api/listings/${id}`);
+    renderDetail();
+  } catch(e) {
+    content.innerHTML = '<div class="empty-state"><p>Failed to load listing</p></div>';
+  }
+}
+
+function closeDetail() {
+  document.getElementById('detailOverlay').classList.remove('open');
+  document.body.style.overflow = '';
+  currentDetailId = null;
+  detailData = null;
+}
+
+function renderDetail() {
+  const d = detailData;
+  const snap = d.snapshot || {};
+  const title = document.getElementById('detailTitle');
+  title.textContent = d.address + (d.unit ? ' #' + d.unit : '');
+
+  updateDetailFavBtn();
+
+  const status = snap.status || 'UNKNOWN';
+  const isSold = ['SOLD', 'SOLD_CONDITIONAL', 'TERMINATED'].includes(status);
+  const statusClass = status === 'FOR_SALE' ? 'for-sale' : (isSold ? 'sold' : '');
+
+  // Gallery
+  let galleryHtml = '';
+  if (d.images && d.images.length > 0) {
+    currentGalleryIndex = 0;
+    galleryHtml = `
+      <div class="detail-gallery" id="galleryContainer">
+        <img id="galleryImg" src="${escHtml(d.images[0])}" alt="" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22/>'">
+        ${d.images.length > 1 ? `
+          <button class="gallery-nav prev" onclick="galleryNav(-1)">&#8249;</button>
+          <button class="gallery-nav next" onclick="galleryNav(1)">&#8250;</button>
+          <div class="gallery-counter" id="galleryCounter">1 / ${d.images.length}</div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  // Info grid
+  const fields = [
+    { label: 'Status', value: formatStatus(status) },
+    { label: 'Beds', value: snap.beds },
+    { label: 'Baths', value: snap.baths },
+    { label: 'Sqft', value: snap.sqft_max || snap.sqft_min ? (snap.sqft_min || snap.sqft_max).toLocaleString() + (snap.sqft_max && snap.sqft_min && snap.sqft_max !== snap.sqft_min ? ' - ' + snap.sqft_max.toLocaleString() : '') : null },
+    { label: 'Maintenance', value: snap.maintenance_fee ? '$' + snap.maintenance_fee.toLocaleString() + '/mo' : null },
+    { label: 'Taxes', value: snap.taxes_annual ? '$' + snap.taxes_annual.toLocaleString() + '/yr' : null },
+    { label: 'Parking', value: snap.parking },
+    { label: 'Locker', value: snap.locker },
+    { label: 'Balcony', value: snap.balcony },
+    { label: 'Exposure', value: snap.exposure },
+    { label: 'Type', value: snap.property_type },
+    { label: 'Year Built', value: snap.year_built },
+    { label: 'Laundry', value: snap.ensuite_laundry },
+    { label: 'Outdoor', value: snap.outdoor_space },
+    { label: 'Possession', value: snap.possession_date },
+    { label: 'Days on Market', value: snap.days_on_market },
+    { label: 'Broker', value: snap.broker },
+    { label: 'Site Estimate', value: snap.site_estimate ? formatPrice(snap.site_estimate) : null },
+  ].filter(f => f.value != null && f.value !== '');
+
+  const infoHtml = fields.map(f => `
+    <div class="info-item">
+      <div class="info-label">${escHtml(f.label)}</div>
+      <div class="info-value">${escHtml(String(f.value))}</div>
+    </div>
+  `).join('');
+
+  // Peer stats
+  let peerHtml = '';
+  if (d.peer_stats && d.peer_stats.peer_count) {
+    const ps = d.peer_stats;
+    const arrow = ps.discount_pct > 0 ? '&#x2193;' : '&#x2191;';
+    const color = ps.discount_pct > 0 ? 'var(--green)' : 'var(--red)';
+    peerHtml = `
+      <div class="section-title">Market Comparison</div>
+      <div class="info-grid">
+        <div class="info-item">
+          <div class="info-label">$/sqft</div>
+          <div class="info-value">$${Math.round(ps.this_ppsf)}</div>
+        </div>
+        <div class="info-item">
+          <div class="info-label">Avg $/sqft (${ps.peer_count} peers)</div>
+          <div class="info-value">$${Math.round(ps.avg_ppsf)}</div>
+        </div>
+        <div class="info-item" style="grid-column: span 2">
+          <div class="info-label">vs Market</div>
+          <div class="info-value" style="color:${color}">${arrow} ${Math.abs(ps.discount_pct).toFixed(1)}% ${ps.discount_pct > 0 ? 'below' : 'above'} average</div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Price history
+  let historyHtml = '';
+  if (d.history && d.history.length > 1) {
+    const priceHistory = d.history.filter(h => h.list_price).reverse();
+    if (priceHistory.length > 1) {
+      historyHtml = `
+        <div class="section-title">Price History</div>
+        ${priceHistory.map(h => `
+          <div class="history-item">
+            <div class="history-date">${formatDate(h.fetched_at)}</div>
+            <div class="history-price">${formatPrice(h.list_price)}</div>
+          </div>
+        `).join('')}
+      `;
+    }
+  }
+
+  // Fee includes
+  let feeHtml = '';
+  if (snap.fee_includes) {
+    feeHtml = `
+      <div class="section-title">Fee Includes</div>
+      <div class="info-item" style="margin-bottom:12px">
+        <div class="info-value" style="font-size:13px; font-weight:400; line-height:1.5">${escHtml(snap.fee_includes)}</div>
+      </div>
+    `;
+  }
+
+  document.getElementById('detailContent').innerHTML = `
+    ${galleryHtml}
+    <div class="detail-content">
+      <div class="detail-price ${isSold ? 'sold' : ''}">
+        ${snap.list_price ? formatPrice(snap.list_price) : 'No price'}
+        <span class="detail-status-badge badge ${statusClass}">${formatStatus(status)}</span>
+      </div>
+      <div style="color: var(--text2); margin-top:4px; font-size:14px">
+        ${d.city || ''}${d.neighbourhood ? ' &middot; ' + escHtml(d.neighbourhood) : ''}
+        ${d.building_name ? ' &middot; ' + escHtml(d.building_name) : ''}
+      </div>
+      ${d.mls_number ? `<div style="color:var(--text2); font-size:12px; margin-top:2px">MLS# ${escHtml(d.mls_number)}</div>` : ''}
+
+      <div class="info-grid" style="margin-top:16px">${infoHtml}</div>
+
+      ${peerHtml}
+      ${feeHtml}
+      ${historyHtml}
+
+      <a class="detail-link" href="${escHtml(d.url)}" target="_blank" rel="noopener">View on ${escHtml(d.site)}</a>
+    </div>
+  `;
+}
+
+function updateDetailFavBtn() {
+  const btn = document.getElementById('detailFavBtn');
+  if (!detailData) return;
+  btn.innerHTML = detailData.favorited ? '&#9733;' : '&#9734;';
+  btn.style.color = detailData.favorited ? 'var(--gold)' : 'var(--text2)';
+}
+
+function toggleDetailFav() {
+  if (currentDetailId) toggleFav(currentDetailId);
+}
+
+function galleryNav(dir) {
+  if (!detailData || !detailData.images) return;
+  const imgs = detailData.images;
+  currentGalleryIndex = (currentGalleryIndex + dir + imgs.length) % imgs.length;
+  document.getElementById('galleryImg').src = imgs[currentGalleryIndex];
+  const counter = document.getElementById('galleryCounter');
+  if (counter) counter.textContent = (currentGalleryIndex + 1) + ' / ' + imgs.length;
+}
+
+// Touch swipe on gallery
+let touchStartX = 0;
+document.addEventListener('touchstart', e => {
+  const gallery = document.getElementById('galleryContainer');
+  if (gallery && gallery.contains(e.target)) {
+    touchStartX = e.touches[0].clientX;
+  }
+});
+document.addEventListener('touchend', e => {
+  const gallery = document.getElementById('galleryContainer');
+  if (gallery && gallery.contains(e.target) && touchStartX) {
+    const diff = e.changedTouches[0].clientX - touchStartX;
+    if (Math.abs(diff) > 50) galleryNav(diff < 0 ? 1 : -1);
+    touchStartX = 0;
+  }
+});
+
+// Back button closes detail
+window.addEventListener('popstate', () => {
+  if (document.getElementById('detailOverlay').classList.contains('open')) {
+    closeDetail();
+  }
+});
+
+// ------ Helpers ------
+function formatPrice(p) {
+  if (!p) return 'N/A';
+  return '$' + Number(p).toLocaleString('en-CA', { maximumFractionDigits: 0 });
+}
+function formatStatus(s) {
+  const map = { FOR_SALE: 'For Sale', SOLD: 'Sold', SOLD_CONDITIONAL: 'Sold Conditional',
+    TERMINATED: 'Terminated', EXPIRED: 'Expired', DELISTED: 'Delisted',
+    BLOCKED: 'Blocked', UNKNOWN: 'Unknown' };
+  return map[s] || s;
+}
+function formatDate(d) {
+  if (!d) return '';
+  try { return new Date(d).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }); }
+  catch { return d; }
+}
+function escHtml(s) {
+  if (!s) return '';
+  const div = document.createElement('div');
+  div.textContent = String(s);
+  return div.innerHTML;
+}
+
+// ------ Init ------
+loadCredentials();
+if (serverUrl && apiKey) {
+  apiFetch('/api/key-check')
+    .then(() => showMainApp())
+    .catch(() => {
+      document.getElementById('serverUrl').value = serverUrl;
+      document.getElementById('apiKeyInput').value = apiKey;
+    });
+} else {
+  // Pre-fill server URL if on localhost
+  if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
+    document.getElementById('serverUrl').value = location.origin;
+  }
+}
+
+// ------ PWA install prompt ------
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredPrompt = e;
+});
+
+// Register service worker
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+</script>
+</body>
+</html>

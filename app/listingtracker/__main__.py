@@ -126,5 +126,9 @@ if __name__ == "__main__":
     if "--enrich-subprocess" in sys.argv:
         from listingtracker.fetcher import _enrich_subprocess_main
         _enrich_subprocess_main()
+    elif "--api" in sys.argv:
+        sys.argv.remove("--api")
+        from listingtracker.api import main as api_main
+        api_main()
     else:
         main()
