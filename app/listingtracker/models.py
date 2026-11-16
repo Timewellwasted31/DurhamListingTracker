@@ -51,6 +51,7 @@ class Listing:
     neighbourhood: Optional[str] = None
     date_added: Optional[datetime] = None
     active: bool = True
+    favorited: bool = False
     user_notes: str = ""
 
 

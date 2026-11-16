@@ -349,6 +349,7 @@ class DetailPane(QWidget):
     research_requested = Signal(int)
     apply_enrichment_requested = Signal(int, dict)
     fetch_history_requested = Signal(int)
+    favorite_toggled = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -389,10 +390,24 @@ class DetailPane(QWidget):
         hdr_layout.setContentsMargins(14, 10, 14, 10)
         hdr_layout.setSpacing(0)
 
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
         self.title_label = QLabel("Select a listing to view details")
         self.title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #fff; background: transparent;")
         self.title_label.setWordWrap(True)
-        hdr_layout.addWidget(self.title_label)
+        title_row.addWidget(self.title_label, 1)
+
+        self._fav_btn = QPushButton("☆")
+        self._fav_btn.setFixedSize(32, 32)
+        self._fav_btn.setToolTip("Toggle favorite")
+        self._fav_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; font-size: 22px; color: #666; }"
+            "QPushButton:hover { color: #ffd54f; }"
+        )
+        self._fav_btn.clicked.connect(self._toggle_favorite)
+        self._fav_btn.setVisible(False)
+        title_row.addWidget(self._fav_btn)
+        hdr_layout.addLayout(title_row)
 
         self.subtitle_label = QLabel()
         self.subtitle_label.setStyleSheet("font-size: 13px; color: #ccc; margin-bottom: 4px; background: transparent;")
@@ -587,6 +602,8 @@ class DetailPane(QWidget):
         if listing.unit:
             addr = f"Unit {listing.unit} — {addr}"
         self.title_label.setText(addr)
+        self._fav_btn.setVisible(True)
+        self._update_favorite_btn()
 
         # Subtitle
         parts = []
@@ -2135,6 +2152,24 @@ class DetailPane(QWidget):
                 self._gallery.set_images(paths)
             else:
                 self._gallery.set_no_images()
+
+    def _toggle_favorite(self):
+        if self._listing:
+            self.favorite_toggled.emit(self._listing.id)
+
+    def _update_favorite_btn(self):
+        if self._listing and self._listing.favorited:
+            self._fav_btn.setText("★")
+            self._fav_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; font-size: 22px; color: #ffd54f; }"
+                "QPushButton:hover { color: #fff; }"
+            )
+        else:
+            self._fav_btn.setText("☆")
+            self._fav_btn.setStyleSheet(
+                "QPushButton { background: transparent; border: none; font-size: 22px; color: #666; }"
+                "QPushButton:hover { color: #ffd54f; }"
+            )
 
     def _save_notes(self):
         if self._listing:

@@ -14,7 +14,7 @@ from listingtracker.adapters.base import clean_text
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS listings (
     neighbourhood TEXT,
     date_added TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
+    favorited INTEGER NOT NULL DEFAULT 0,
     user_notes TEXT NOT NULL DEFAULT ''
 );
 
@@ -140,6 +141,12 @@ def init_db() -> None:
                 conn.execute("UPDATE schema_version SET version = 4")
                 conn.commit()
                 logger.info("Migrated database to version 4")
+                current = 4
+            if current < 5:
+                _migrate_v4_to_v5(conn)
+                conn.execute("UPDATE schema_version SET version = 5")
+                conn.commit()
+                logger.info("Migrated database to version 5")
 
 
 def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
@@ -173,6 +180,13 @@ def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_listing_images_listing
             ON listing_images(listing_id, position);
     """)
+    conn.commit()
+
+
+def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(listings)").fetchall()}
+    if "favorited" not in existing:
+        conn.execute("ALTER TABLE listings ADD COLUMN favorited INTEGER NOT NULL DEFAULT 0")
     conn.commit()
 
 
@@ -244,7 +258,7 @@ def update_listing(listing: Listing) -> None:
     with _connect() as conn:
         conn.execute(
             "UPDATE listings SET mls_number=?, address=?, unit=?, "
-            "building_name=?, city=?, neighbourhood=?, active=?, user_notes=? "
+            "building_name=?, city=?, neighbourhood=?, active=?, favorited=?, user_notes=? "
             "WHERE id=?",
             (
                 listing.mls_number,
@@ -254,11 +268,36 @@ def update_listing(listing: Listing) -> None:
                 listing.city,
                 listing.neighbourhood,
                 1 if listing.active else 0,
+                1 if listing.favorited else 0,
                 listing.user_notes,
                 listing.id,
             ),
         )
         conn.commit()
+
+
+def toggle_favorite(listing_id: int) -> bool:
+    """Toggle the favorited flag. Returns the new state."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT favorited FROM listings WHERE id = ?", (listing_id,)
+        ).fetchone()
+        if not row:
+            return False
+        new_val = 0 if row["favorited"] else 1
+        conn.execute(
+            "UPDATE listings SET favorited = ? WHERE id = ?", (new_val, listing_id)
+        )
+        conn.commit()
+        return bool(new_val)
+
+
+def get_favorited_listings() -> list[Listing]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM listings WHERE favorited = 1 AND active = 1"
+        ).fetchall()
+        return [_row_to_listing(r) for r in rows]
 
 
 def add_snapshot(snapshot: Snapshot) -> int:
@@ -595,6 +634,7 @@ def get_consecutive_blocked_count(listing_id: int) -> int:
 
 
 def _row_to_listing(row: sqlite3.Row) -> Listing:
+    keys = row.keys()
     return Listing(
         id=row["id"],
         url=row["url"],
@@ -607,6 +647,7 @@ def _row_to_listing(row: sqlite3.Row) -> Listing:
         neighbourhood=row["neighbourhood"],
         date_added=datetime.fromisoformat(row["date_added"]) if row["date_added"] else None,
         active=bool(row["active"]),
+        favorited=bool(row["favorited"]) if "favorited" in keys else False,
         user_notes=row["user_notes"],
     )
 

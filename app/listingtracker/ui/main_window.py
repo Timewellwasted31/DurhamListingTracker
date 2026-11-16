@@ -27,7 +27,7 @@ from listingtracker.db import (
     get_all_listings, get_listing_by_url, get_latest_snapshot,
     get_all_latest_snapshots, get_previous_snapshot, get_snapshots_for_listing,
     add_listing, update_listing, delete_listing, cleanup_bad_listings,
-    cleanup_non_purchasable, normalize_url,
+    cleanup_non_purchasable, normalize_url, toggle_favorite,
 )
 from listingtracker.config import load_config, save_config, config_to_finance
 from listingtracker.finance import (
@@ -815,6 +815,12 @@ class MainWindow(QMainWindow):
         self.filter_pos.stateChanged.connect(self._apply_filters)
         filter_row.addWidget(self.filter_pos)
 
+        self.filter_favorites = QCheckBox("★")
+        self.filter_favorites.setToolTip("Show only favorited listings")
+        self.filter_favorites.setStyleSheet("QCheckBox { color: #ffd54f; font-size: 14px; }")
+        self.filter_favorites.stateChanged.connect(self._apply_filters)
+        filter_row.addWidget(self.filter_favorites)
+
         sidebar_layout.addLayout(filter_row)
 
         self.listing_list = QListWidget()
@@ -842,6 +848,7 @@ class MainWindow(QMainWindow):
         self.detail_pane.research_requested.connect(self._research_listing)
         self.detail_pane.apply_enrichment_requested.connect(self._apply_enrichment)
         self.detail_pane.fetch_history_requested.connect(self._fetch_listing_history)
+        self.detail_pane.favorite_toggled.connect(self._on_favorite_toggled)
         self.detail_pane.set_finance_config(self.finance_cfg)
         splitter.addWidget(self.detail_pane)
 
@@ -1158,6 +1165,10 @@ class MainWindow(QMainWindow):
                 if not (snap and snap.power_of_sale):
                     continue
 
+            if self.filter_favorites.isChecked():
+                if not listing.favorited:
+                    continue
+
             if profile and profile.show_buffer_listings and listing_class == "over":
                 continue
 
@@ -1236,7 +1247,8 @@ class MainWindow(QMainWindow):
                 if listing.unit:
                     addr = f"{listing.unit} — {addr}"
 
-                line1 = addr
+                star = "★ " if listing.favorited else ""
+                line1 = f"{star}{addr}"
                 line2_parts = []
                 if snap:
                     status_str = snap.status.value if isinstance(snap.status, Status) else "?"
@@ -1325,13 +1337,23 @@ class MainWindow(QMainWindow):
         if listing_id is None:
             return
 
+        listing = next((l for l in self._listings_cache if l.id == listing_id), None)
+
         menu = QMenu(self)
+        fav_label = "Unfavorite" if (listing and listing.favorited) else "Favorite ★"
+        fav_action = menu.addAction(fav_label)
+        menu.addSeparator()
         remove_action = menu.addAction("Remove Listing")
         open_action = menu.addAction("Open in Browser")
         action = menu.exec(self.listing_list.mapToGlobal(pos))
 
-        if action == remove_action:
-            listing = next((l for l in self._listings_cache if l.id == listing_id), None)
+        if action == fav_action:
+            new_state = toggle_favorite(listing_id)
+            if listing:
+                listing.favorited = new_state
+            self._populate_list()
+            self._sync_map_data()
+        elif action == remove_action:
             addr = listing.address if listing else "this listing"
             reply = QMessageBox.question(
                 self, "Remove Listing",
@@ -2073,6 +2095,16 @@ class MainWindow(QMainWindow):
         self._research_step_done("history")
 
     # --- Notes & browser ---
+
+    def _on_favorite_toggled(self, listing_id: int):
+        new_state = toggle_favorite(listing_id)
+        for listing in self._listings_cache:
+            if listing.id == listing_id:
+                listing.favorited = new_state
+                break
+        self.detail_pane._update_favorite_btn()
+        self._populate_list()
+        self._sync_map_data()
 
     def _on_notes_saved(self, listing_id: int, text: str):
         for listing in self._listings_cache:
