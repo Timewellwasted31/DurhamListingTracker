@@ -389,6 +389,32 @@ body {
   cursor: pointer;
 }
 .login-screen .error { color: var(--red); font-size: 13px; margin-top: 8px; }
+.login-screen .or-divider {
+  color: var(--text2); font-size: 13px; margin: 16px 0 8px; text-align: center;
+}
+.scan-qr-btn {
+  width: 100%; max-width: 340px; padding: 14px; border-radius: var(--radius);
+  border: 2px solid var(--accent); background: transparent; color: var(--accent);
+  font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 8px;
+}
+.scan-qr-btn:hover { background: rgba(21,101,192,0.1); }
+#qrScanOverlay {
+  display: none; position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,0.95); flex-direction: column; align-items: center;
+  justify-content: center;
+}
+#qrScanOverlay.active { display: flex; }
+#qrScanOverlay video {
+  width: 90%; max-width: 400px; border-radius: 12px; border: 3px solid var(--accent);
+}
+#qrScanOverlay .scan-hint {
+  color: #fff; font-size: 15px; margin: 16px 0; text-align: center;
+}
+#qrScanOverlay .scan-cancel {
+  background: #333; color: #fff; border: none; border-radius: 8px;
+  padding: 12px 32px; font-size: 14px; cursor: pointer; margin-top: 12px;
+}
+#qrScanOverlay canvas { display: none; }
 
 /* ---------- Loading / empty ---------- */
 .loading {
@@ -442,7 +468,17 @@ body {
   <input type="text" id="serverUrl" placeholder="Server URL (e.g. http://192.168.1.10:8000)">
   <input type="password" id="apiKeyInput" placeholder="API Key">
   <button onclick="doLogin()">Connect</button>
+  <div class="or-divider">— or —</div>
+  <button class="scan-qr-btn" onclick="startQrScan()">Scan QR Code</button>
   <div id="loginError" class="error" style="display:none"></div>
+</div>
+
+<!-- QR Scanner Overlay -->
+<div id="qrScanOverlay">
+  <div class="scan-hint">Point your camera at the QR code<br>shown on the desktop app</div>
+  <video id="qrVideo" autoplay playsinline></video>
+  <canvas id="qrCanvas"></canvas>
+  <button class="scan-cancel" onclick="stopQrScan()">Cancel</button>
 </div>
 
 <!-- Main App -->
@@ -1001,6 +1037,83 @@ function escHtml(s) {
   const div = document.createElement('div');
   div.textContent = String(s);
   return div.innerHTML;
+}
+
+// ------ QR Scanner ------
+let qrStream = null;
+let qrScanning = false;
+
+async function startQrScan() {
+  const overlay = document.getElementById('qrScanOverlay');
+  const video = document.getElementById('qrVideo');
+  overlay.classList.add('active');
+
+  try {
+    qrStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+    video.srcObject = qrStream;
+    qrScanning = true;
+    scanQrFrame();
+  } catch (err) {
+    overlay.classList.remove('active');
+    alert('Camera access denied. Please allow camera access to scan QR codes, or enter the connection details manually.');
+  }
+}
+
+function stopQrScan() {
+  qrScanning = false;
+  const overlay = document.getElementById('qrScanOverlay');
+  overlay.classList.remove('active');
+  if (qrStream) {
+    qrStream.getTracks().forEach(t => t.stop());
+    qrStream = null;
+  }
+}
+
+async function scanQrFrame() {
+  if (!qrScanning) return;
+  const video = document.getElementById('qrVideo');
+  const canvas = document.getElementById('qrCanvas');
+
+  if (video.readyState === video.HAVE_ENOUGH_DATA) {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0);
+
+    // Use BarcodeDetector API (Chrome Android 83+)
+    if ('BarcodeDetector' in window) {
+      try {
+        const detector = new BarcodeDetector({ formats: ['qr_code'] });
+        const barcodes = await detector.detect(canvas);
+        if (barcodes.length > 0) {
+          handleQrResult(barcodes[0].rawValue);
+          return;
+        }
+      } catch (e) { /* fall through */ }
+    }
+  }
+  requestAnimationFrame(scanQrFrame);
+}
+
+function handleQrResult(raw) {
+  stopQrScan();
+  try {
+    const data = JSON.parse(raw);
+    if (data.url && data.key) {
+      serverUrl = data.url;
+      apiKey = data.key;
+      document.getElementById('serverUrl').value = serverUrl;
+      document.getElementById('apiKeyInput').value = apiKey;
+      // Auto-connect
+      doLogin();
+    } else {
+      alert('Invalid QR code. Please scan the code shown in the desktop app.');
+    }
+  } catch (e) {
+    alert('Could not read QR code. Please scan the code shown in the desktop app.');
+  }
 }
 
 // ------ Init ------

@@ -426,6 +426,22 @@ async def key_check(_=Depends(verify_api_key)):
     return {"ok": True}
 
 
+@app.get("/api/pair-info")
+async def pair_info():
+    """Return pairing data (server URL hint + API key) for QR code generation.
+    No auth required — called by the desktop app itself to build the QR."""
+    import socket
+    local_ip = "127.0.0.1"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+    return {"url": f"http://{local_ip}:8000", "key": _get_api_key()}
+
+
 def _snap_dict(snap) -> dict:
     if not snap:
         return {}

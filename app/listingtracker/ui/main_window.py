@@ -657,6 +657,11 @@ class MainWindow(QMainWindow):
         self.export_btn.clicked.connect(self._export_csv)
         tb_layout.addWidget(self.export_btn)
 
+        self.pair_btn = QPushButton("Pair Mobile")
+        self.pair_btn.setObjectName("pairBtn")
+        self.pair_btn.clicked.connect(self._show_pair_dialog)
+        tb_layout.addWidget(self.pair_btn)
+
         self.show_browser_cb = QCheckBox("Show browser")
         self.show_browser_cb.setChecked(self.config.get("show_browser", False))
         tb_layout.addWidget(self.show_browser_cb)
@@ -1739,6 +1744,11 @@ class MainWindow(QMainWindow):
             self._load_listings()
 
     # --- Export ---
+
+    def _show_pair_dialog(self):
+        from listingtracker.ui.pair_dialog import PairDialog
+        dlg = PairDialog(self)
+        dlg.exec()
 
     def _export_csv(self):
         EXPORTS_DIR.mkdir(parents=True, exist_ok=True)

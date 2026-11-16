@@ -42,6 +42,7 @@ a = Analysis(
         "plyer.platforms.win",
         "plyer.platforms.win.notification",
         "curl_cffi",
+        "qrcode",
     ] + mpl_hiddenimports,
     hookspath=[],
     hooksconfig={},
