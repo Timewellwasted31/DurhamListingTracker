@@ -10,9 +10,10 @@ from typing import Optional
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QPushButton, QScrollArea, QFrame, QGridLayout, QGroupBox,
-    QTabWidget, QSlider, QSpinBox,
+    QTabWidget, QSlider, QSpinBox, QSizePolicy,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QObject, QThread
+from PySide6.QtGui import QPixmap, QCursor
 
 from listingtracker.models import Listing, Snapshot, Status
 from listingtracker.finance import (
@@ -29,6 +30,7 @@ from listingtracker.areanews import AreaNews, CATEGORY_LABELS, SCOPES
 from listingtracker.profiles import BuyerProfile
 from listingtracker.ui.commute_tab import CommuteTab
 from listingtracker import db as listing_db
+from listingtracker import images as listing_images
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +115,199 @@ AREA_NEWS_COLORS = {
     "death": "#b0bec5",
     "disruption": "#81d4fa",
 }
+
+class _ImageDownloadWorker(QObject):
+    finished = Signal(int, list)  # listing_id, list of local paths
+
+    def __init__(self, listing_id: int):
+        super().__init__()
+        self.listing_id = listing_id
+
+    def run(self):
+        try:
+            paths = listing_images.download_listing_images(self.listing_id)
+        except Exception:
+            paths = []
+        self.finished.emit(self.listing_id, paths)
+
+
+class _ImageGallery(QWidget):
+    """Horizontally scrollable listing photo gallery with nav arrows."""
+
+    google_maps_requested = Signal(float, float)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._paths: list[str] = []
+        self._current = 0
+        self._pixmap_cache: dict[str, QPixmap] = {}
+        self.setFixedHeight(220)
+        self.setStyleSheet("background: transparent;")
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(2)
+
+        img_row = QHBoxLayout()
+        img_row.setSpacing(0)
+
+        self._prev_btn = QPushButton("<")
+        self._prev_btn.setFixedSize(28, 180)
+        self._prev_btn.setStyleSheet(
+            "QPushButton { background: rgba(30,30,30,180); color: #fff; border: none; "
+            "font-size: 18px; font-weight: bold; border-radius: 4px; }"
+            "QPushButton:hover { background: rgba(60,60,60,200); }"
+        )
+        self._prev_btn.clicked.connect(self._go_prev)
+        img_row.addWidget(self._prev_btn)
+
+        self._image_label = QLabel()
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image_label.setMinimumHeight(180)
+        self._image_label.setStyleSheet(
+            "background: #151520; border: 1px solid #333; border-radius: 6px;"
+        )
+        self._image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        img_row.addWidget(self._image_label, 1)
+
+        self._next_btn = QPushButton(">")
+        self._next_btn.setFixedSize(28, 180)
+        self._next_btn.setStyleSheet(
+            "QPushButton { background: rgba(30,30,30,180); color: #fff; border: none; "
+            "font-size: 18px; font-weight: bold; border-radius: 4px; }"
+            "QPushButton:hover { background: rgba(60,60,60,200); }"
+        )
+        self._next_btn.clicked.connect(self._go_next)
+        img_row.addWidget(self._next_btn)
+
+        layout.addLayout(img_row)
+
+        bottom = QHBoxLayout()
+        self._counter = QLabel()
+        self._counter.setStyleSheet("color: #888; font-size: 11px;")
+        bottom.addWidget(self._counter)
+        bottom.addStretch()
+
+        self._gmaps_btn = QPushButton("Google Maps")
+        self._gmaps_btn.setStyleSheet(
+            "QPushButton { background: #2a4a2a; color: #a5d6a7; border: none; "
+            "border-radius: 3px; padding: 3px 10px; font-size: 11px; }"
+            "QPushButton:hover { background: #3a6a3a; }"
+        )
+        self._gmaps_btn.setToolTip("Open location in Google Maps")
+        self._gmaps_btn.setVisible(False)
+        bottom.addWidget(self._gmaps_btn)
+
+        self._streetview_btn = QPushButton("Street View")
+        self._streetview_btn.setStyleSheet(
+            "QPushButton { background: #2a3a5a; color: #90caf9; border: none; "
+            "border-radius: 3px; padding: 3px 10px; font-size: 11px; }"
+            "QPushButton:hover { background: #3a5a7a; }"
+        )
+        self._streetview_btn.setToolTip("Open Google Street View")
+        self._streetview_btn.setVisible(False)
+        bottom.addWidget(self._streetview_btn)
+
+        layout.addLayout(bottom)
+
+    def set_images(self, paths: list[str]):
+        self._paths = paths
+        self._current = 0
+        self._show_current()
+
+    def set_coords(self, lat: float, lon: float):
+        if lat and lon:
+            self._gmaps_btn.setVisible(True)
+            self._streetview_btn.setVisible(True)
+            maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+            sv_url = f"https://www.google.com/maps/@?api=1&map_action=pano&viewpoint={lat},{lon}"
+            try:
+                self._gmaps_btn.clicked.disconnect()
+            except RuntimeError:
+                pass
+            try:
+                self._streetview_btn.clicked.disconnect()
+            except RuntimeError:
+                pass
+            self._gmaps_btn.clicked.connect(lambda: self._open_url(maps_url))
+            self._streetview_btn.clicked.connect(lambda: self._open_url(sv_url))
+        else:
+            self._gmaps_btn.setVisible(False)
+            self._streetview_btn.setVisible(False)
+
+    def set_loading(self):
+        self._image_label.setText("Loading photos...")
+        self._image_label.setStyleSheet(
+            "background: #151520; border: 1px solid #333; border-radius: 6px; "
+            "color: #666; font-size: 12px;"
+        )
+        self._counter.setText("")
+        self._prev_btn.setVisible(False)
+        self._next_btn.setVisible(False)
+
+    def set_no_images(self):
+        self._image_label.setText("No photos available")
+        self._image_label.setStyleSheet(
+            "background: #151520; border: 1px solid #333; border-radius: 6px; "
+            "color: #555; font-size: 12px;"
+        )
+        self._counter.setText("")
+        self._prev_btn.setVisible(False)
+        self._next_btn.setVisible(False)
+
+    def _show_current(self):
+        if not self._paths:
+            self.set_no_images()
+            return
+
+        self._current = max(0, min(self._current, len(self._paths) - 1))
+        path = self._paths[self._current]
+
+        if path not in self._pixmap_cache:
+            pm = QPixmap(path)
+            if not pm.isNull():
+                self._pixmap_cache[path] = pm
+
+        pm = self._pixmap_cache.get(path)
+        if pm and not pm.isNull():
+            scaled = pm.scaled(
+                self._image_label.width() or 500, 180,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._image_label.setPixmap(scaled)
+            self._image_label.setStyleSheet(
+                "background: #0a0a12; border: 1px solid #333; border-radius: 6px;"
+            )
+        else:
+            self._image_label.setText("Failed to load image")
+            self._image_label.setStyleSheet(
+                "background: #151520; border: 1px solid #333; border-radius: 6px; "
+                "color: #555; font-size: 12px;"
+            )
+
+        total = len(self._paths)
+        self._counter.setText(f"Photo {self._current + 1} of {total}")
+        self._prev_btn.setVisible(total > 1)
+        self._next_btn.setVisible(total > 1)
+
+    def _go_prev(self):
+        if self._paths:
+            self._current = (self._current - 1) % len(self._paths)
+            self._show_current()
+
+    def _go_next(self):
+        if self._paths:
+            self._current = (self._current + 1) % len(self._paths)
+            self._show_current()
+
+    @staticmethod
+    def _open_url(url: str):
+        import webbrowser
+        webbrowser.open(url)
+
 
 PTYPE_HEADER_COLORS = {
     "CONDO": "#1a2e24",
@@ -243,6 +438,14 @@ class DetailPane(QWidget):
         hdr_layout.addWidget(self.broker_label)
 
         self._layout.addWidget(self._header_container)
+
+        # Image gallery
+        self._gallery = _ImageGallery()
+        self._gallery.setVisible(False)
+        self._layout.addWidget(self._gallery)
+
+        self._img_thread: QThread | None = None
+        self._img_worker: _ImageDownloadWorker | None = None
 
         # Tabs
         self.tabs = QTabWidget()
@@ -438,6 +641,7 @@ class DetailPane(QWidget):
             self.pos_label.setVisible(False)
             self.broker_label.setVisible(False)
             self.tabs.setVisible(False)
+            self._gallery.setVisible(False)
             hdr_color = _header_bg_for_ptype(None, listing.url)
             self._header_container.setStyleSheet(
                 f"QFrame {{ background: {hdr_color}; border-radius: 8px; padding: 0; margin: 0 0 6px 0; }}"
@@ -520,6 +724,9 @@ class DetailPane(QWidget):
         self._header_container.setStyleSheet(
             f"QFrame {{ background: {hdr_color}; border-radius: 8px; padding: 0; margin: 0 0 6px 0; }}"
         )
+
+        # Image gallery
+        self._load_images(listing)
 
         # Build tabs
         self.tabs.clear()
@@ -1867,6 +2074,67 @@ class DetailPane(QWidget):
             "background: #1e1e1e; border: 1px solid #333; border-radius: 8px; "
             f"color: {color}; font-size: 12px;"
         )
+
+    def _load_images(self, listing: Listing):
+        """Show cached images immediately, download missing ones in background."""
+        from listingtracker import geo
+
+        self._gallery.setVisible(True)
+
+        # Set Google Maps/Street View coords from geocode cache
+        address = (listing.address or "").strip()
+        city = (listing.city or "").strip()
+        cache_key = f"listing:{address.lower()}|{city.lower()}"
+        cached = geo._cache_get(cache_key)
+        if cached and isinstance(cached, dict) and cached.get("place"):
+            p = cached["place"]
+            self._gallery.set_coords(p.get("lat", 0), p.get("lon", 0))
+        else:
+            self._gallery.set_coords(0, 0)
+
+        cached = listing_images.get_cached_images(listing.id)
+        if cached:
+            self._gallery.set_images(cached)
+        else:
+            db_images = listing_db.get_listing_images(listing.id)
+            if not db_images:
+                snap = self._snapshots[-1] if self._snapshots else None
+                if snap:
+                    listing_images.extract_from_cached_html(
+                        listing.id, listing.url,
+                        snapshot_id=snap.id,
+                        raw_html_path=snap.raw_html_path,
+                    )
+                    db_images = listing_db.get_listing_images(listing.id)
+            if db_images:
+                self._gallery.set_loading()
+                self._start_image_download(listing.id)
+            else:
+                self._gallery.set_no_images()
+
+    def _start_image_download(self, listing_id: int):
+        if self._img_thread and self._img_thread.isRunning():
+            return
+        thread = QThread()
+        worker = _ImageDownloadWorker(listing_id)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_images_ready)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: setattr(self, "_img_thread", None))
+        thread.finished.connect(lambda: setattr(self, "_img_worker", None))
+        self._img_worker = worker
+        self._img_thread = thread
+        thread.start()
+
+    def _on_images_ready(self, listing_id: int, paths: list[str]):
+        if self._listing and self._listing.id == listing_id:
+            if paths:
+                self._gallery.set_images(paths)
+            else:
+                self._gallery.set_no_images()
 
     def _save_notes(self):
         if self._listing:

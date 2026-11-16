@@ -175,6 +175,40 @@ class StrataAdapter(SiteAdapter):
             return True
         return False
 
+    def extract_images(self, html: str, url: str = "") -> list[str]:
+        """Strata-specific: pull images from RSC payload, prefer ?class=large."""
+        rsc = self._extract_rsc_text(html)
+        rsc_images: list[str] = []
+        seen: set[str] = set()
+
+        if rsc:
+            listing = self._find_listing_in_rsc(rsc, self._unit_from_url(url))
+            mls = listing.get("mlsNumber", "") if listing else ""
+
+            for m in re.finditer(r'(https?://cdn\.strata\.ca/IMG-[^"\s,}]+)', rsc):
+                img = m.group(1)
+                if mls and mls not in img:
+                    continue
+                if "?class=large" not in img:
+                    img = img.split("?")[0] + "?class=large"
+                if img not in seen:
+                    seen.add(img)
+                    rsc_images.append(img)
+
+            if not rsc_images:
+                for m in re.finditer(r'(https?://cdn\.strata\.ca/IMG-[^"\s,}]+)', rsc):
+                    img = m.group(1)
+                    if "?class=large" not in img:
+                        img = img.split("?")[0] + "?class=large"
+                    if img not in seen:
+                        seen.add(img)
+                        rsc_images.append(img)
+
+        if rsc_images:
+            return rsc_images[:20]
+
+        return super().extract_images(html, url)
+
     # --- RSC payload extraction ---
 
     @staticmethod

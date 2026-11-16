@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import json
 import logging
+from collections import OrderedDict
 from typing import Optional
 
 from listingtracker.adapters.base import SiteAdapter
@@ -29,6 +30,14 @@ class WahiAdapter(SiteAdapter):
         # Listing URLs end with an address slug containing a postal code
         last = parts[-1]
         return bool(_re.search(r'[a-z]\d[a-z]\d[a-z]\d', last, _re.IGNORECASE))
+
+    def detect_blocked(self, html: str) -> bool:
+        if super().detect_blocked(html):
+            return True
+        if not re.search(r'id="__NEXT_DATA__"', html):
+            if "Find your dream home" in html[:5000] or "ps-card" in html[:20000]:
+                return True
+        return False
 
     def parse(self, html: str, url: str = "") -> dict:
         errors = []
@@ -166,8 +175,8 @@ class WahiAdapter(SiteAdapter):
                     if p:
                         return p
         for p in [
+            r'"listPrice"\s*:\s*"?\$?([\d,]+)"?',
             r'"price"\s*:\s*"?\$?([\d,]+)"?',
-            r'class="[^"]*price[^"]*"[^>]*>\s*\$?([\d,]+)',
             r'(?:Asking|List\s*Price|Price)\s*:?\s*\$?([\d,]+)',
         ]:
             m = re.search(p, html, re.IGNORECASE)
@@ -175,4 +184,37 @@ class WahiAdapter(SiteAdapter):
                 return self._safe_price(m.group(1))
         errors.append("parse failed for wahi.com: list_price")
         return None
+
+    def extract_images(self, html: str, url: str = "") -> list[str]:
+        """Extract listing photos, filtering to this listing's MLS only."""
+        mls = self._rx(html, r'"mlsId"\s*:\s*"([A-Z]\d{7,})"') or ""
+        if not mls:
+            mls = self._rx(html, r'MLS[®#:\s]*([A-Z]\d{7,})') or ""
+        if not mls:
+            return super().extract_images(html, url)
+
+        pattern = re.compile(
+            r'(https://cdn\.wahi\.com/listings/images/[^"\'>\s]*IMG-'
+            + re.escape(mls) + r'[^"\'>\s]*)',
+        )
+        raw_urls = pattern.findall(html)
+        if not raw_urls:
+            return super().extract_images(html, url)
+
+        PREFERRED_SIZE = "-1200."
+        unique: OrderedDict[str, str] = OrderedDict()
+        for u in raw_urls:
+            m = re.search(r'IMG-[A-Z0-9]+_([a-f0-9]+)', u)
+            if not m:
+                continue
+            img_hash = m.group(1)
+            if img_hash not in unique:
+                unique[img_hash] = u
+            elif PREFERRED_SIZE in u:
+                unique[img_hash] = u
+            elif PREFERRED_SIZE not in unique[img_hash] and u.endswith(".jpg"):
+                unique[img_hash] = u
+
+        result = list(unique.values())[:20]
+        return result
 

@@ -409,6 +409,18 @@ class ProfileDialog(QDialog):
         prox_inner.addLayout(poi_btns)
         prox_group.setLayout(prox_inner)
         loc_layout.addWidget(prox_group)
+
+        from listingtracker.amenities import CATEGORIES
+        amenity_group = QGroupBox("Map Amenity Layers (shown on Map tab)")
+        amenity_inner = QVBoxLayout()
+        self.amenity_checks: dict[str, QCheckBox] = {}
+        for key, cat in CATEGORIES.items():
+            cb = QCheckBox(cat.label)
+            cb.setChecked(key in self.profile.map_amenity_layers)
+            self.amenity_checks[key] = cb
+            amenity_inner.addWidget(cb)
+        amenity_group.setLayout(amenity_inner)
+        loc_layout.addWidget(amenity_group)
         tabs.addTab(loc_tab, "Location")
 
         # --- Tab 3: Requirements ---
@@ -783,6 +795,10 @@ class ProfileDialog(QDialog):
             earliest_offer_date=self.earliest_offer_date.date().toString("yyyy-MM-dd") if self.earliest_offer_cb.isChecked() else "",
             latest_offer_date=self.latest_offer_date.date().toString("yyyy-MM-dd") if self.latest_offer_cb.isChecked() else "",
             risk_notes=self.risk_notes_edit.toPlainText(),
+        )
+        profile = replace(
+            profile,
+            map_amenity_layers=[key for key, cb in self.amenity_checks.items() if cb.isChecked()],
         )
         self.location_editor.apply_to(profile)
         return profile

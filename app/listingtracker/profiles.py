@@ -81,6 +81,7 @@ class BuyerProfile:
     work_lat: float = 0.0
     work_lon: float = 0.0
     city_coords: dict[str, list[float]] = field(default_factory=dict)  # city -> [lat, lon]
+    map_amenity_layers: list[str] = field(default_factory=lambda: ["schools", "grocery", "transit"])
 
     # --- Property requirements ---
     min_beds: int = 2

@@ -17,6 +17,22 @@ class CondominiumsAdapter(SiteAdapter):
     site_name = "condominiums.ca"
     domain_pattern = r"condominiums\.ca"
 
+    @classmethod
+    def is_listing_url(cls, url: str) -> bool:
+        from urllib.parse import urlparse
+        path = urlparse(url).path.lower().rstrip("/")
+        reject = (
+            "pre-construction", "search-all", "new-condos", "new-homes",
+            "assignment", "sold-condos", "sold-homes", "rental",
+        )
+        for slug in reject:
+            if slug in path:
+                return False
+        parts = path.strip("/").split("/")
+        if len(parts) < 2:
+            return False
+        return True
+
     def parse(self, html: str, url: str = "") -> dict:
         errors = []
         result = {}

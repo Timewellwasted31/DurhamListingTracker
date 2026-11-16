@@ -14,7 +14,7 @@ from listingtracker.adapters.base import clean_text
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -68,6 +68,18 @@ CREATE TABLE IF NOT EXISTS snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_listing ON snapshots(listing_id, fetched_at DESC);
+
+CREATE TABLE IF NOT EXISTS listing_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    url TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    local_path TEXT,
+    position INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(listing_id, url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_listing_images_listing ON listing_images(listing_id, position);
 """
 
 SEED_URLS = [
@@ -122,6 +134,12 @@ def init_db() -> None:
                 conn.execute("UPDATE schema_version SET version = 3")
                 conn.commit()
                 logger.info("Migrated database to version 3")
+                current = 3
+            if current < 4:
+                _migrate_v3_to_v4(conn)
+                conn.execute("UPDATE schema_version SET version = 4")
+                conn.commit()
+                logger.info("Migrated database to version 4")
 
 
 def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
@@ -138,6 +156,23 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
     existing = {r[1] for r in conn.execute("PRAGMA table_info(snapshots)").fetchall()}
     if "power_of_sale" not in existing:
         conn.execute("ALTER TABLE snapshots ADD COLUMN power_of_sale INTEGER")
+    conn.commit()
+
+
+def _migrate_v3_to_v4(conn: sqlite3.Connection) -> None:
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS listing_images (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            listing_id INTEGER NOT NULL REFERENCES listings(id),
+            url TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            local_path TEXT,
+            position INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(listing_id, url)
+        );
+        CREATE INDEX IF NOT EXISTS idx_listing_images_listing
+            ON listing_images(listing_id, position);
+    """)
     conn.commit()
 
 
@@ -406,6 +441,7 @@ def get_peer_stats(
 
 def delete_listing(listing_id: int) -> None:
     with _connect() as conn:
+        conn.execute("DELETE FROM listing_images WHERE listing_id = ?", (listing_id,))
         conn.execute("DELETE FROM snapshots WHERE listing_id = ?", (listing_id,))
         conn.execute("DELETE FROM listings WHERE id = ?", (listing_id,))
         conn.commit()
@@ -428,61 +464,47 @@ def cleanup_empty_listings() -> int:
 
 
 def cleanup_bad_listings(after_fetch: bool = False) -> int:
-    """Delete listings that have no useful data, and deduplicate.
+    """Delete listings that have never had useful data, and deduplicate.
 
-    By default, skips listings added in the last 2 hours so newly discovered
-    listings survive long enough to be fetched. Pass after_fetch=True to skip
-    the grace period (used after a fetch pass when we know fetching was attempted).
+    Only removes listings that have NEVER had a good snapshot (valid address
+    or price). Listings that previously parsed successfully are always kept
+    even if the latest fetch failed or was blocked.
+
+    Pass after_fetch=True to skip the 2-hour grace period.
     """
     with _connect() as conn:
         ids_to_delete = set()
 
-        if after_fetch:
-            rows = conn.execute(
-                "SELECT l.id FROM listings l "
-                "LEFT JOIN snapshots s ON l.id = s.listing_id "
-                "WHERE l.address = '' AND s.id IS NULL"
-            ).fetchall()
-            ids_to_delete.update(r["id"] for r in rows)
+        grace = "" if after_fetch else (
+            " AND l.date_added < '" +
+            (datetime.utcnow() - timedelta(hours=2)).isoformat() + "'"
+        )
 
-            rows = conn.execute(
-                "SELECT l.id FROM listings l "
-                "WHERE l.address = '' AND NOT EXISTS ("
-                "  SELECT 1 FROM snapshots s WHERE s.listing_id = l.id "
-                "  AND s.list_price IS NOT NULL AND s.list_price > 0"
-                ")"
-            ).fetchall()
-            ids_to_delete.update(r["id"] for r in rows)
-        else:
-            cutoff = (datetime.utcnow() - timedelta(hours=2)).isoformat()
-
-            rows = conn.execute(
-                "SELECT l.id FROM listings l "
-                "LEFT JOIN snapshots s ON l.id = s.listing_id "
-                "WHERE l.address = '' AND s.id IS NULL "
-                "AND l.date_added < ?",
-                (cutoff,),
-            ).fetchall()
-            ids_to_delete.update(r["id"] for r in rows)
-
-            rows = conn.execute(
-                "SELECT l.id FROM listings l "
-                "WHERE l.address = '' AND l.date_added < ? AND NOT EXISTS ("
-                "  SELECT 1 FROM snapshots s WHERE s.listing_id = l.id "
-                "  AND s.list_price IS NOT NULL AND s.list_price > 0"
-                ")",
-                (cutoff,),
-            ).fetchall()
-            ids_to_delete.update(r["id"] for r in rows)
-
-        # 3) Anomalous prices: list_price > 0 but < 10000 is clearly bad data
+        # Listings with no address AND no snapshot with a valid price — never useful
         rows = conn.execute(
-            "SELECT DISTINCT s.listing_id FROM snapshots s "
-            "WHERE s.list_price > 0 AND s.list_price < 10000"
+            "SELECT l.id FROM listings l "
+            "WHERE (l.address IS NULL OR l.address = '')" + grace + " "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM snapshots s WHERE s.listing_id = l.id "
+            "  AND s.list_price IS NOT NULL AND s.list_price >= 10000"
+            ")"
         ).fetchall()
-        ids_to_delete.update(r["listing_id"] for r in rows)
+        ids_to_delete.update(r["id"] for r in rows)
 
-        # 4) Deduplicate: same normalized URL, keep the oldest (lowest id)
+        # Listings with no snapshots at all (and past grace period)
+        rows = conn.execute(
+            "SELECT l.id FROM listings l "
+            "LEFT JOIN snapshots s ON l.id = s.listing_id "
+            "WHERE s.id IS NULL" + grace
+        ).fetchall()
+        ids_to_delete.update(r["id"] for r in rows)
+
+        # Anomalous prices: delete the BAD SNAPSHOTS, not the listing
+        conn.execute(
+            "DELETE FROM snapshots WHERE list_price > 0 AND list_price < 10000"
+        )
+
+        # Deduplicate: same normalized URL, keep the oldest (lowest id)
         all_listings = conn.execute(
             "SELECT id, url FROM listings ORDER BY id"
         ).fetchall()
@@ -501,30 +523,30 @@ def cleanup_bad_listings(after_fetch: bool = False) -> int:
                 f"DELETE FROM snapshots WHERE listing_id IN ({placeholders})", ids
             )
             conn.execute(
+                f"DELETE FROM listing_images WHERE listing_id IN ({placeholders})", ids
+            )
+            conn.execute(
                 f"DELETE FROM listings WHERE id IN ({placeholders})", ids
             )
-            remaining = conn.execute("SELECT id, url FROM listings").fetchall()
-            for r in remaining:
-                normed = normalize_url(r["url"])
-                if normed != r["url"]:
-                    conn.execute(
-                        "UPDATE listings SET url = ? WHERE id = ?",
-                        (normed, r["id"]),
-                    )
-            conn.commit()
+        # Normalize URLs on remaining listings
+        remaining = conn.execute("SELECT id, url FROM listings").fetchall()
+        for r in remaining:
+            normed = normalize_url(r["url"])
+            if normed != r["url"]:
+                conn.execute(
+                    "UPDATE listings SET url = ? WHERE id = ?",
+                    (normed, r["id"]),
+                )
+        conn.commit()
         return len(ids)
 
 
 def cleanup_non_purchasable() -> int:
-    """Delete listings that a buyer can't purchase.
+    """Delete freshly-discovered listings that a buyer can't purchase.
 
-    Removes single-snapshot listings that are:
-    - SOLD, TERMINATED, UNKNOWN, or BLOCKED status
-    - Have no price (NULL or 0) regardless of status
-    - Have no address and no price
-
-    Only targets listings with exactly one snapshot (freshly discovered).
-    Listings with multiple snapshots (history) are kept.
+    Only targets listings with exactly one snapshot whose ONLY snapshot is
+    SOLD, TERMINATED, or has no price. Never deletes listings with BLOCKED
+    or UNKNOWN status (those may just be a temporary fetch failure).
     """
     with _connect() as conn:
         rows = conn.execute(
@@ -533,14 +555,16 @@ def cleanup_non_purchasable() -> int:
             "GROUP BY l.id "
             "HAVING COUNT(s.id) = 1 "
             "AND ("
-            "  MAX(s.status) IN ('SOLD', 'TERMINATED', 'UNKNOWN', 'BLOCKED')"
-            "  OR MAX(COALESCE(s.list_price, 0)) <= 0"
+            "  MAX(s.status) IN ('SOLD', 'TERMINATED')"
+            "  OR (MAX(COALESCE(s.list_price, 0)) <= 0 "
+            "      AND MAX(s.status) NOT IN ('BLOCKED', 'UNKNOWN'))"
             ")"
         ).fetchall()
         ids = [r["id"] for r in rows]
         if ids:
             ph = ",".join("?" * len(ids))
             conn.execute(f"DELETE FROM snapshots WHERE listing_id IN ({ph})", ids)
+            conn.execute(f"DELETE FROM listing_images WHERE listing_id IN ({ph})", ids)
             conn.execute(f"DELETE FROM listings WHERE id IN ({ph})", ids)
             conn.commit()
         return len(ids)
@@ -585,6 +609,38 @@ def _row_to_listing(row: sqlite3.Row) -> Listing:
         active=bool(row["active"]),
         user_notes=row["user_notes"],
     )
+
+
+def save_listing_images(listing_id: int, urls: list[str], source: str = "") -> None:
+    if not urls:
+        return
+    with _connect() as conn:
+        for i, url in enumerate(urls):
+            conn.execute(
+                "INSERT OR IGNORE INTO listing_images "
+                "(listing_id, url, source, position) VALUES (?, ?, ?, ?)",
+                (listing_id, url, source, i),
+            )
+        conn.commit()
+
+
+def get_listing_images(listing_id: int) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, url, source, local_path, position "
+            "FROM listing_images WHERE listing_id = ? ORDER BY position",
+            (listing_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_image_local_path(image_id: int, local_path: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE listing_images SET local_path = ? WHERE id = ?",
+            (local_path, image_id),
+        )
+        conn.commit()
 
 
 def _row_to_snapshot(row: sqlite3.Row) -> Snapshot:

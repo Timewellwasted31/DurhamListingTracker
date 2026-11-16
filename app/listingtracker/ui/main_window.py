@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QPushButton, QLabel, QProgressBar,
     QCheckBox, QLineEdit, QComboBox, QInputDialog, QMessageBox,
     QFrame, QAbstractItemView, QSpinBox, QDoubleSpinBox, QGroupBox,
-    QFormLayout, QApplication, QMenu, QScrollArea,
+    QFormLayout, QApplication, QMenu, QScrollArea, QStackedWidget,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QSize, QTimer, QRectF
 from PySide6.QtGui import QColor, QIcon, QPalette, QFont, QAction, QPainter, QLinearGradient, QBrush
@@ -51,6 +51,7 @@ from listingtracker.crossref import (
 from listingtracker.ui.detail_pane import DetailPane
 from listingtracker.ui.settings_dialog import SettingsDialog
 from listingtracker.ui.profile_dialog import ProfileDialog
+from listingtracker.ui.map_overview import MapOverview
 from listingtracker.paths import EXPORTS_DIR
 from listingtracker.__version__ import __version__
 from listingtracker.updater import check_for_update, download_installer, launch_installer, UpdateInfo
@@ -352,6 +353,7 @@ QMenu::item:selected {
 
 class FetchWorker(QObject):
     progress = Signal(int, int, str)
+    batch_done = Signal(list, list)
     finished = Signal(list, list)
     error = Signal(str)
 
@@ -369,11 +371,15 @@ class FetchWorker(QObject):
             def on_progress(i, total, address):
                 self.progress.emit(i, total, address)
 
+            def on_batch(snaps, changes):
+                self.batch_done.emit(snaps, changes)
+
             snaps, changes = fetch_all(
                 self.listings,
                 show_browser=self.show_browser,
                 progress_callback=on_progress,
                 cancel_check=lambda: self._cancelled,
+                batch_callback=on_batch,
             )
             self.finished.emit(snaps, changes)
         except Exception as e:
@@ -655,6 +661,25 @@ class MainWindow(QMainWindow):
         self.show_browser_cb.setChecked(self.config.get("show_browser", False))
         tb_layout.addWidget(self.show_browser_cb)
 
+        tb_layout.addWidget(QLabel("  "))
+        self._list_btn = QPushButton("List")
+        self._list_btn.setCheckable(True)
+        self._list_btn.setChecked(True)
+        self._list_btn.setStyleSheet(
+            "QPushButton { background: #333; color: #aaa; border: 1px solid #555; "
+            "border-radius: 3px; padding: 4px 12px; font-size: 11px; }"
+            "QPushButton:checked { background: #1565c0; color: #fff; border-color: #1565c0; }"
+        )
+        self._list_btn.clicked.connect(lambda: self._set_view(0))
+        tb_layout.addWidget(self._list_btn)
+
+        self._map_btn = QPushButton("Map")
+        self._map_btn.setCheckable(True)
+        self._map_btn.setChecked(False)
+        self._map_btn.setStyleSheet(self._list_btn.styleSheet())
+        self._map_btn.clicked.connect(lambda: self._set_view(1))
+        tb_layout.addWidget(self._map_btn)
+
         tb_layout.addStretch()
 
         self.last_refresh_label = QLabel("Last refresh: never")
@@ -822,7 +847,15 @@ class MainWindow(QMainWindow):
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        root.addWidget(splitter, 1)
+
+        self._map_overview = MapOverview()
+        self._map_overview.listing_selected.connect(self._on_map_listing_selected)
+        self._map_overview.set_finance_config(self.finance_cfg)
+
+        self._view_stack = QStackedWidget()
+        self._view_stack.addWidget(splitter)
+        self._view_stack.addWidget(self._map_overview)
+        root.addWidget(self._view_stack, 1)
 
         version_label = QLabel(f"v{__version__}")
         version_label.setStyleSheet("color: #555; font-size: 10px; padding-right: 8px;")
@@ -879,9 +912,29 @@ class MainWindow(QMainWindow):
         save_config(self.config)
         self.finance_cfg = config_to_finance(self.config)
         self.detail_pane.set_finance_config(self.finance_cfg)
+        self._map_overview.set_finance_config(self.finance_cfg)
         self.detail_pane.set_profile(profile)
         self._update_profile_summary()
         self._populate_list()
+        self._sync_map_data()
+
+    def _sync_map_data(self):
+        self._map_overview.set_data(
+            self._listings_cache, self._listing_snapshots, self._active_profile,
+        )
+
+    def _set_view(self, index: int):
+        self._view_stack.setCurrentIndex(index)
+        self._list_btn.setChecked(index == 0)
+        self._map_btn.setChecked(index == 1)
+
+    def _on_map_listing_selected(self, listing_id: int):
+        self._set_view(0)
+        for i in range(self.listing_list.count()):
+            item = self.listing_list.item(i)
+            if item and item.data(Qt.ItemDataRole.UserRole) == listing_id:
+                self.listing_list.setCurrentItem(item)
+                break
 
     def _update_profile_summary(self):
         p = self._active_profile
@@ -1059,6 +1112,7 @@ class MainWindow(QMainWindow):
         for listing in needs_update:
             update_listing(listing)
         self._populate_list()
+        self._sync_map_data()
 
     def _populate_list(self):
         current = self.listing_list.currentItem()
@@ -1371,6 +1425,7 @@ class MainWindow(QMainWindow):
 
         self._fetch_thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_fetch_progress)
+        self._worker.batch_done.connect(self._on_batch_done)
         self._worker.finished.connect(self._on_fetch_finished)
         self._worker.error.connect(self._on_fetch_error)
         self._worker.finished.connect(self._fetch_thread.quit)
@@ -1388,6 +1443,12 @@ class MainWindow(QMainWindow):
         self.progress_label.setVisible(True)
         self.statusBar().showMessage(f"Fetching {current+1}/{total}: {address}")
 
+    def _on_batch_done(self, snapshots: list, changes: list):
+        """Refresh UI after each batch so the user sees progress."""
+        self._listings_cache = get_all_listings(active_only=False)
+        self._listing_snapshots = get_all_latest_snapshots()
+        self._populate_list()
+
     def _on_fetch_finished(self, snapshots: list, changes: list):
         elapsed = self._format_elapsed()
         self._elapsed_timer.stop()
@@ -1399,11 +1460,9 @@ class MainWindow(QMainWindow):
         )
 
         removed = cleanup_bad_listings(after_fetch=True)
-        sold_removed = cleanup_non_purchasable()
-        total_removed = removed + sold_removed
         msg = f"Done — {len(snapshots)} fetched, {len(changes)} changes  [{elapsed}]"
-        if total_removed:
-            msg += f", {total_removed} non-purchasable removed"
+        if removed:
+            msg += f", {removed} bad listings removed"
         self.statusBar().showMessage(msg, 15000)
 
         self._show_changes(changes)
@@ -1630,6 +1689,7 @@ class MainWindow(QMainWindow):
 
         self._fetch_thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_fetch_progress)
+        self._worker.batch_done.connect(self._on_batch_done)
         self._worker.finished.connect(self._on_fetch_finished)
         self._worker.error.connect(self._on_fetch_error)
         self._worker.finished.connect(self._fetch_thread.quit)
@@ -1653,6 +1713,7 @@ class MainWindow(QMainWindow):
             save_config(self.config)
             self.finance_cfg = config_to_finance(self.config)
             self.detail_pane.set_finance_config(self.finance_cfg)
+            self._map_overview.set_finance_config(self.finance_cfg)
             self._load_listings()
 
     # --- Export ---

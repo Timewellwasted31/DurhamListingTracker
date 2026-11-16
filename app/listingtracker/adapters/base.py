@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
 import logging
 from abc import ABC, abstractmethod
+from html import unescape as html_unescape
 from typing import Optional
+from urllib.parse import urljoin, urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +145,118 @@ class SiteAdapter(ABC):
             v = self._safe_int(m.group(1))
             return v, v
         return None, None
+
+    def extract_images(self, html: str, url: str = "") -> list[str]:
+        """Extract listing photo URLs from HTML. Returns deduplicated list, best first."""
+        seen: set[str] = set()
+        seen_base: set[str] = set()
+        result: list[str] = []
+
+        def _base_key(img_url: str) -> str:
+            """Deduplicate different sizes of the same image."""
+            p = urlparse(img_url).path.lower()
+            p = re.sub(r'-(?:\d{2,4}|large|medium|small|thumb|[lmst])\.(jpe?g|png|webp)', r'.\1', p)
+            p = re.sub(r'\?.*$', '', p)
+            return p
+
+        def _add(img_url: str) -> None:
+            if not img_url or len(img_url) > 2000:
+                return
+            img_url = html_unescape(img_url.strip())
+            if img_url.startswith("//"):
+                img_url = "https:" + img_url
+            elif img_url.startswith("/"):
+                img_url = urljoin(url, img_url) if url else ""
+            if not img_url.startswith("http"):
+                return
+            parsed = urlparse(img_url)
+            path_lower = parsed.path.lower()
+            if any(x in path_lower for x in ("/logo", "/icon", "/favicon", "/avatar",
+                                              "/badge", "/sprite", "/pixel", "/blank",
+                                              "/static/", "/agent", "/chat-bubble",
+                                              ".svg", ".gif")):
+                return
+            bk = _base_key(img_url)
+            if img_url not in seen and bk not in seen_base:
+                seen.add(img_url)
+                seen_base.add(bk)
+                result.append(img_url)
+
+        # 1. og:image meta tags (usually the hero image)
+        for m in re.finditer(
+            r'<meta\s+(?:property|name)="og:image(?::url)?"\s+content="([^"]+)"', html
+        ):
+            _add(m.group(1))
+
+        # 2. JSON-LD image fields
+        for m in re.finditer(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
+            try:
+                ld = json.loads(m.group(1))
+                if isinstance(ld, list):
+                    for item in ld:
+                        self._extract_ld_images(item, _add)
+                elif isinstance(ld, dict):
+                    self._extract_ld_images(ld, _add)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # 3. High-res img tags with src matching CDN/image patterns
+        for m in re.finditer(
+            r'<img\b[^>]*?\bsrc="([^"]+)"[^>]*/?>',
+            html,
+        ):
+            src = m.group(1)
+            tag = m.group(0)
+            if self._is_listing_photo(src, tag):
+                _add(src)
+
+        # 4. data-src / srcset attributes (lazy-loaded images)
+        for m in re.finditer(r'<img\b[^>]*?\bdata-src="([^"]+)"', html):
+            src = m.group(1)
+            if self._is_listing_photo(src, m.group(0)):
+                _add(src)
+
+        for m in re.finditer(r'<img\b[^>]*?\bsrcset="([^"]+)"', html):
+            for entry in m.group(1).split(","):
+                src = entry.strip().split()[0]
+                if self._is_listing_photo(src, ""):
+                    _add(src)
+
+        return result
+
+    @staticmethod
+    def _extract_ld_images(ld: dict, add_fn) -> None:
+        imgs = ld.get("image")
+        if isinstance(imgs, str):
+            add_fn(imgs)
+        elif isinstance(imgs, list):
+            for img in imgs:
+                if isinstance(img, str):
+                    add_fn(img)
+                elif isinstance(img, dict):
+                    add_fn(img.get("url", "") or img.get("contentUrl", ""))
+
+    @staticmethod
+    def _is_listing_photo(src: str, tag_html: str) -> bool:
+        """Heuristic: is this img src likely a listing photo (not UI chrome)?"""
+        if not src or src.startswith("data:"):
+            return False
+        lower = src.lower()
+        if any(x in lower for x in ("/logo", "/icon", "/favicon", "/avatar",
+                                     "/badge", "/sprite", "/static/", "/agent",
+                                     "/chat-bubble", ".svg", ".gif",
+                                     "pixel", "blank", "placeholder",
+                                     "google", "facebook", "twitter")):
+            return False
+        has_large_dim = bool(re.search(r'(?:width|w)[=_/](?:[4-9]\d{2}|\d{4,})', lower))
+        has_photo_keyword = bool(re.search(
+            r'(?:photo|image|gallery|listing|property|unit|media|upload|cdn|res\.cloudinary|imgix)',
+            lower,
+        ))
+        small = re.search(r'(?:width|height)="(\d+)"', tag_html)
+        if small and int(small.group(1)) < 100:
+            return False
+        return has_large_dim or has_photo_keyword
 
     @staticmethod
     def _detect_power_of_sale(html: str) -> bool:

@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import numpy as np
@@ -159,6 +159,8 @@ class MapMarker:
     label: str = ""
     color: str = "#42a5f5"
     glyph: str = ""
+    radius: int = 9
+    hover_text: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -190,6 +192,7 @@ class MapWidget(QWidget):
         self._regions: list[MapRegion] = []
         self._candidate_regions: list[MapRegion] = []
         self._hovered_candidate: Optional[int] = None
+        self._hovered_marker_idx: Optional[int] = None
         self._press_pos: Optional[QPointF] = None
         self._press_center: tuple[float, float] = (0.0, 0.0)
         self._dragging = False
@@ -312,6 +315,9 @@ class MapWidget(QWidget):
             self._press_pos = event.position()
             self._press_center = project(self._lat, self._lon, self._zoom)
             self._dragging = False
+            if self._hovered_marker_idx is not None:
+                self._hovered_marker_idx = None
+                self.update()
 
     def mouseMoveEvent(self, event):
         if self._press_pos is not None:
@@ -358,16 +364,38 @@ class MapWidget(QWidget):
             if _point_in_region(lat, lon, region):
                 self._hovered_candidate = i
                 break
-        if self._hovered_candidate is not None:
+
+        old_marker = self._hovered_marker_idx
+        self._hovered_marker_idx = None
+        best_dist = float("inf")
+        for i, m in enumerate(self._markers):
+            if not m.hover_text:
+                continue
+            mpt = self._to_screen(m.lat, m.lon)
+            dx = pos.x() - mpt.x()
+            dy = pos.y() - mpt.y()
+            d = dx * dx + dy * dy
+            threshold = (m.radius + 8) ** 2
+            if d < threshold and d < best_dist:
+                best_dist = d
+                self._hovered_marker_idx = i
+
+        if self._hovered_candidate is not None or self._hovered_marker_idx is not None:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
         else:
             self.unsetCursor()
-        if self._hovered_candidate != old:
+        if self._hovered_candidate != old or self._hovered_marker_idx != old_marker:
             self.update()
 
     def leaveEvent(self, event):
+        changed = False
         if self._hovered_candidate is not None:
             self._hovered_candidate = None
+            changed = True
+        if self._hovered_marker_idx is not None:
+            self._hovered_marker_idx = None
+            changed = True
+        if changed:
             self.unsetCursor()
             self.update()
         super().leaveEvent(event)
@@ -381,6 +409,7 @@ class MapWidget(QWidget):
         self._paint_regions(p)
         self._paint_routes(p)
         self._paint_markers(p)
+        self._paint_hover_card(p)
         self._paint_attribution(p)
         p.setPen(QPen(QColor("#333"), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -500,23 +529,118 @@ class MapWidget(QWidget):
             pt = self._to_screen(m.lat, m.lon)
             if not self.rect().adjusted(-40, -40, 40, 40).contains(pt.toPoint()):
                 continue
+            r = m.radius
             if m.label:
                 text_w = metrics.horizontalAdvance(m.label)
-                box = QRect(int(pt.x()) + 13, int(pt.y()) - 9, text_w + 10, 18)
+                box = QRect(int(pt.x()) + r + 4, int(pt.y()) - 9, text_w + 10, 18)
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(20, 20, 20, 215))
                 p.drawRoundedRect(box, 4, 4)
                 p.setPen(QColor("#e0e0e0"))
                 p.setFont(label_font)
                 p.drawText(box, Qt.AlignmentFlag.AlignCenter, m.label)
-            p.setPen(QPen(QColor("#ffffff"), 2))
+            p.setPen(QPen(QColor("#ffffff"), 2 if r >= 7 else 1))
             p.setBrush(QColor(m.color))
-            p.drawEllipse(pt, 9, 9)
+            p.drawEllipse(pt, r, r)
             if m.glyph:
                 p.setPen(QColor("#ffffff"))
                 p.setFont(glyph_font)
-                p.drawText(QRect(int(pt.x()) - 9, int(pt.y()) - 9, 18, 18),
+                p.drawText(QRect(int(pt.x()) - r, int(pt.y()) - r, r * 2, r * 2),
                            Qt.AlignmentFlag.AlignCenter, m.glyph)
+
+    def _paint_hover_card(self, p: QPainter) -> None:
+        if self._hovered_marker_idx is None:
+            return
+        if self._hovered_marker_idx >= len(self._markers):
+            return
+        m = self._markers[self._hovered_marker_idx]
+        if not m.hover_text:
+            return
+
+        pt = self._to_screen(m.lat, m.lon)
+
+        # Expanded pin
+        p.setPen(QPen(QColor("#ffffff"), 2))
+        p.setBrush(QColor(m.color))
+        p.drawEllipse(pt, m.radius + 3, m.radius + 3)
+
+        # Card dimensions
+        title_font = QFont(self.font())
+        title_font.setBold(True)
+        title_font.setPointSize(10)
+        detail_font = QFont(self.font())
+        detail_font.setPointSize(9)
+        title_metrics = QFontMetrics(title_font)
+        detail_metrics = QFontMetrics(detail_font)
+
+        lines = m.hover_text
+        title = lines[0] if lines else ""
+        details = lines[1:]
+
+        padding = 10
+        line_h = detail_metrics.height() + 2
+        title_h = title_metrics.height() + 2
+        card_w = max(
+            title_metrics.horizontalAdvance(title),
+            max((detail_metrics.horizontalAdvance(d) for d in details), default=0),
+        ) + padding * 2
+        card_w = max(card_w, 140)
+        card_w = min(card_w, 280)
+        card_h = padding + title_h + len(details) * line_h + padding
+        arrow_h = 8
+
+        # Position card above the marker
+        cx = int(pt.x() - card_w / 2)
+        cy = int(pt.y() - m.radius - 6 - arrow_h - card_h)
+
+        # Clamp to widget bounds
+        if cx < 4:
+            cx = 4
+        if cx + card_w > self.width() - 4:
+            cx = self.width() - 4 - card_w
+        if cy < 4:
+            cy = int(pt.y() + m.radius + 6 + arrow_h)
+
+        card_rect = QRect(cx, cy, card_w, card_h)
+
+        # Card background
+        p.setPen(QPen(QColor("#555"), 1))
+        p.setBrush(QColor(24, 24, 30, 240))
+        p.drawRoundedRect(card_rect, 6, 6)
+
+        # Arrow pointing to marker
+        arrow_x = int(pt.x())
+        if card_rect.bottom() < pt.y():
+            arrow_top = card_rect.bottom()
+            arrow = QPolygonF([
+                QPointF(arrow_x - 6, arrow_top),
+                QPointF(arrow_x + 6, arrow_top),
+                QPointF(arrow_x, arrow_top + arrow_h),
+            ])
+        else:
+            arrow_bot = card_rect.top()
+            arrow = QPolygonF([
+                QPointF(arrow_x - 6, arrow_bot),
+                QPointF(arrow_x + 6, arrow_bot),
+                QPointF(arrow_x, arrow_bot - arrow_h),
+            ])
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(24, 24, 30, 240))
+        p.drawPolygon(arrow)
+
+        # Title line
+        y = cy + padding
+        p.setFont(title_font)
+        p.setPen(QColor("#ffffff"))
+        p.drawText(cx + padding, y + title_metrics.ascent(), title)
+        y += title_h
+
+        # Detail lines
+        p.setFont(detail_font)
+        p.setPen(QColor("#bbbbbb"))
+        for line in details:
+            p.drawText(cx + padding, y + detail_metrics.ascent(), line)
+            y += line_h
 
     def _paint_attribution(self, p: QPainter) -> None:
         font = QFont(self.font())

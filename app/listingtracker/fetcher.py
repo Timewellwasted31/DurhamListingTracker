@@ -22,6 +22,8 @@ from listingtracker.db import (
     get_latest_snapshot,
     get_consecutive_blocked_count,
     update_listing,
+    save_listing_images,
+    get_listing_images,
 )
 from listingtracker.adapters.base import SiteAdapter, clean_parsed
 from listingtracker.adapters.strata import StrataAdapter
@@ -225,6 +227,12 @@ def fetch_listing(
         if adapter.detect_blocked(html):
             logger.warning("BLOCKED on %s", listing.url)
             prev = get_latest_snapshot(listing.id)
+
+            # If we already have good data, don't overwrite with a blocked snapshot
+            if prev and prev.list_price and prev.status not in (Status.BLOCKED, Status.UNKNOWN):
+                logger.info("Keeping existing good data for %s (blocked this time)", listing.url)
+                return None, []
+
             snap = Snapshot(
                 listing_id=listing.id,
                 fetched_at=datetime.utcnow().isoformat(),
@@ -304,6 +312,14 @@ def fetch_listing(
 
         raw_path = _store_html(html, snap_id)
         snap.raw_html_path = raw_path
+
+        if not get_listing_images(listing.id):
+            try:
+                image_urls = adapter.extract_images(html, url=listing.url)
+                if image_urls:
+                    save_listing_images(listing.id, image_urls, source=adapter.site_name)
+            except Exception as e:
+                logger.debug("Image extraction failed for %s: %s", listing.url, e)
 
         changes = diff_snapshots(listing, prev, snap)
 
@@ -432,6 +448,7 @@ def _filter_already_fetched_today(
 
 
 MAX_WORKERS = 8
+BATCH_SIZE = 50
 
 
 def fetch_all(
@@ -440,13 +457,14 @@ def fetch_all(
     progress_callback=None,
     show_browser: bool = False,
     cancel_check=None,
+    batch_callback=None,
 ) -> tuple[list[Snapshot], list]:
-    """Fetch all listings, running domains in parallel for speed."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    """Fetch listings in batches, running domains in parallel within each batch.
 
-    with _DOMAIN_LOCK:
-        DOMAIN_LOAD_COUNTS.clear()
-    _clean_browser_locks()
+    *batch_callback(snapshots, changes)* is called after each batch so the
+    caller can refresh the UI mid-run.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     active = [l for l in listings if l.active]
     before_count = len(active)
@@ -459,46 +477,71 @@ def fetch_all(
             progress_callback(0, 0, "All listings already up to date today")
         return [], []
 
-    by_domain: dict[str, list[Listing]] = {}
-    for listing in active:
-        domain = _get_domain(listing.url)
-        by_domain.setdefault(domain, []).append(listing)
-
     total = len(active)
-    progress_lock = threading.Lock()
-    done_count = [0]
-
     all_snapshots: list[Snapshot] = []
     all_changes: list = []
 
-    chunks: list[tuple[str, list[Listing]]] = []
-    for domain, domain_listings in by_domain.items():
-        workers_for_domain = max(1, round(len(domain_listings) / total * MAX_WORKERS))
-        chunk_size = max(1, len(domain_listings) // workers_for_domain)
-        for i in range(0, len(domain_listings), chunk_size):
-            chunks.append((domain, domain_listings[i:i + chunk_size]))
+    for batch_start in range(0, len(active), BATCH_SIZE):
+        if cancel_check and cancel_check():
+            break
 
-    max_workers = min(len(chunks), MAX_WORKERS)
+        batch = active[batch_start:batch_start + BATCH_SIZE]
+        logger.info("Batch %d–%d of %d", batch_start + 1,
+                     min(batch_start + len(batch), len(active)), len(active))
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        for domain, chunk in chunks:
-            futures[executor.submit(
-                _fetch_domain_batch,
-                chunk, show_browser,
-                progress_callback, progress_lock, done_count, total,
-                cancel_check,
-            )] = domain
+        with _DOMAIN_LOCK:
+            DOMAIN_LOAD_COUNTS.clear()
+        _clean_browser_locks()
 
-        for f in as_completed(futures):
-            domain = futures[f]
+        by_domain: dict[str, list[Listing]] = {}
+        for listing in batch:
+            domain = _get_domain(listing.url)
+            by_domain.setdefault(domain, []).append(listing)
+
+        progress_lock = threading.Lock()
+        done_count = [batch_start]
+
+        chunks: list[tuple[str, list[Listing]]] = []
+        for domain, domain_listings in by_domain.items():
+            batch_total = len(batch)
+            workers_for_domain = max(1, round(len(domain_listings) / max(batch_total, 1) * MAX_WORKERS))
+            chunk_size = max(1, len(domain_listings) // workers_for_domain)
+            for i in range(0, len(domain_listings), chunk_size):
+                chunks.append((domain, domain_listings[i:i + chunk_size]))
+
+        max_workers = min(len(chunks), MAX_WORKERS)
+
+        batch_snaps: list[Snapshot] = []
+        batch_changes: list = []
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for domain, chunk in chunks:
+                futures[executor.submit(
+                    _fetch_domain_batch,
+                    chunk, show_browser,
+                    progress_callback, progress_lock, done_count, total,
+                    cancel_check,
+                )] = domain
+
+            for f in as_completed(futures):
+                domain = futures[f]
+                try:
+                    snaps, changes = f.result()
+                    batch_snaps.extend(snaps)
+                    batch_changes.extend(changes)
+                    logger.info("Domain %s chunk: fetched %d snapshots", domain, len(snaps))
+                except Exception as e:
+                    logger.error("Fetch worker for %s failed: %s", domain, e)
+
+        all_snapshots.extend(batch_snaps)
+        all_changes.extend(batch_changes)
+
+        if batch_callback:
             try:
-                snaps, changes = f.result()
-                all_snapshots.extend(snaps)
-                all_changes.extend(changes)
-                logger.info("Domain %s chunk: fetched %d snapshots", domain, len(snaps))
-            except Exception as e:
-                logger.error("Fetch worker for %s failed: %s", domain, e)
+                batch_callback(batch_snaps, batch_changes)
+            except Exception:
+                pass
 
     return all_snapshots, sort_changes(all_changes)
 

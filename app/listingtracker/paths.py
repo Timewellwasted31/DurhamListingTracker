@@ -26,6 +26,7 @@ EXPORTS_DIR = DATA_DIR / "exports"
 CACHE_DIR = ROOT / "cache"
 HTML_CACHE_DIR = CACHE_DIR / "html"
 TILE_CACHE_DIR = CACHE_DIR / "tiles"
+IMAGE_CACHE_DIR = CACHE_DIR / "images"
 GEO_CACHE_PATH = CACHE_DIR / "geo_cache.db"
 MPL_CACHE_DIR = CACHE_DIR / "matplotlib"  # chart library's font cache
 
@@ -47,6 +48,7 @@ RUNTIME_DIRS = [
     CACHE_DIR,
     HTML_CACHE_DIR,
     TILE_CACHE_DIR,
+    IMAGE_CACHE_DIR,
     MPL_CACHE_DIR,
     BROWSER_DIR,
     BROWSER_PROFILE_DIR,
