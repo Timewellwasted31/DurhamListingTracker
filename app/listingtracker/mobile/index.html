@@ -891,8 +891,15 @@ function escHtml(s) {
 }
 
 // ------ Init ------
-loadCredentials();
-if (serverUrl && apiKey) {
+// Support auto-connect via URL params: ?key=API_KEY[&url=SERVER_URL]
+const urlParams = new URLSearchParams(location.search);
+const paramKey = urlParams.get('key');
+const paramUrl = urlParams.get('url');
+if (paramKey) {
+  apiKey = paramKey;
+  serverUrl = paramUrl || location.origin;
+  saveCredentials();
+  history.replaceState(null, '', location.pathname);
   apiFetch('/api/key-check')
     .then(() => showMainApp())
     .catch(() => {
@@ -900,9 +907,18 @@ if (serverUrl && apiKey) {
       document.getElementById('apiKeyInput').value = apiKey;
     });
 } else {
-  // Pre-fill server URL if on localhost
-  if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
-    document.getElementById('serverUrl').value = location.origin;
+  loadCredentials();
+  if (serverUrl && apiKey) {
+    apiFetch('/api/key-check')
+      .then(() => showMainApp())
+      .catch(() => {
+        document.getElementById('serverUrl').value = serverUrl;
+        document.getElementById('apiKeyInput').value = apiKey;
+      });
+  } else {
+    if (location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.hostname === '10.0.2.2') {
+      document.getElementById('serverUrl').value = location.origin;
+    }
   }
 }
 
