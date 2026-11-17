@@ -14,6 +14,12 @@ build/
 # Stray logs
 app/stderr.log
 
+# Release signing key and its passwords: never in the repository
+android/signing/
+*.jks
+*.keystore
+keystore.properties
+
 # Android build state and machine-specific SDK path
 android/.gradle/
 android/build/

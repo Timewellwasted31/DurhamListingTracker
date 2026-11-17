@@ -2,6 +2,12 @@ plugins {
     id 'com.android.application'
 }
 
+// The release key lives outside the repository (android/signing/, ignored by git). Without it,
+// release builds come out unsigned and are never copied to the server; debug builds still work.
+def signingProps = new Properties()
+def signingFile = rootProject.file('signing/keystore.properties')
+if (signingFile.exists()) signingFile.withInputStream { signingProps.load(it) }
+
 android {
     namespace 'com.durhamlistings.app'
     compileSdk 34
@@ -14,10 +20,22 @@ android {
         versionName "2.9.0"
     }
 
+    signingConfigs {
+        if (signingFile.exists()) {
+            release {
+                storeFile rootProject.file("signing/${signingProps['storeFile']}")
+                storePassword signingProps['storePassword']
+                keyAlias signingProps['keyAlias']
+                keyPassword signingProps['keyPassword']
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (signingFile.exists()) signingConfig signingConfigs.release
         }
         debug {
             debuggable true
@@ -34,13 +52,19 @@ android {
     }
 }
 
-// The desktop server offers the phone its newest build: after each debug build, copy the APK and
+// The desktop server offers phones its newest build: after each release build, copy the APK and
 // its version (from defaultConfig above, the single source of it) to where the server reads them.
+// Only release builds, so phones are only ever offered APKs signed with the release key.
 def serverAppDir = rootProject.file('../app/listingtracker/mobile/android')
 android.applicationVariants.configureEach { variant ->
-    if (variant.buildType.name != 'debug') return
+    if (variant.buildType.name != 'release') return
     variant.assembleProvider.configure {
         doLast {
+            if (!variant.signingReady) {
+                throw new GradleException(
+                        'Release build is unsigned: android/signing/keystore.properties is missing. ' +
+                        'Restore the signing folder from its backup; a new key cannot update installed apps.')
+            }
             def apk = variant.outputs.first().outputFile
             serverAppDir.mkdirs()
             copy {
