@@ -4,12 +4,10 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.view.View;
-import android.webkit.WebStorage;
 import android.widget.TextView;
 
 import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
-import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.google.android.material.button.MaterialButton;
@@ -138,11 +136,14 @@ public class PairActivity extends AppCompatActivity {
             String key = json.optString("key", "");
             String fp = ServerLink.normalize(json.optString("fp", ""));
 
+            // "urls" holds the secure addresses; "url" is the plain home-network address, kept for
+            // the browser version and servers too old to offer HTTPS. The key would travel
+            // unencrypted on it, so it is used only when there is nothing else.
             List<String> urls = new ArrayList<>();
             JSONArray arr = json.optJSONArray("urls");
             for (int i = 0; arr != null && i < arr.length(); i++) urls.add(arr.getString(i));
-            String legacy = json.optString("url", "");
-            if (!legacy.isEmpty() && !urls.contains(legacy)) urls.add(legacy);
+            String plain = json.optString("url", "");
+            if (urls.isEmpty() && !plain.isEmpty()) urls.add(plain);
 
             if (urls.isEmpty() || key.isEmpty()) {
                 showError(getString(R.string.invalid_qr));
@@ -238,19 +239,12 @@ public class PairActivity extends AppCompatActivity {
     }
 
     private void confirmForget() {
-        new AlertDialog.Builder(this)
-                .setTitle(R.string.disconnect_title)
-                .setMessage(R.string.disconnect_message)
-                .setNegativeButton(android.R.string.cancel, null)
-                .setPositiveButton(R.string.disconnect, (d, w) -> {
-                    getSharedPreferences(ServerLink.PREFS, MODE_PRIVATE).edit().clear().apply();
-                    WebStorage.getInstance().deleteAllData();
-                    savedUrls = Collections.emptyList();
-                    savedKey = "";
-                    savedFp = "";
-                    showMode(Mode.QR);
-                })
-                .show();
+        ServerLink.confirmForget(this, () -> {
+            savedUrls = Collections.emptyList();
+            savedKey = "";
+            savedFp = "";
+            showMode(Mode.QR);
+        });
     }
 
     private void showError(String msg) {

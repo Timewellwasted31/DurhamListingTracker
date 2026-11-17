@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 import json
 import logging
 import random
+import secrets
 import socket
 import threading
 import urllib.error
@@ -21,6 +23,7 @@ from listingtracker.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
+API_KEY_PATH = DATA_DIR / "api_key.txt"
 TLS_DIR = DATA_DIR / "tls"
 CERT_PATH = TLS_DIR / "server.crt"
 KEY_PATH = TLS_DIR / "server.key"
@@ -44,6 +47,22 @@ _WAN_SERVICES = (
 _CONFLICT = 718
 _PERMANENT_LEASE_ONLY = 725
 _TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
+
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
+
+@functools.cache
+def api_key() -> str:
+    """The key paired devices present with every request; created on first use."""
+    if API_KEY_PATH.exists():
+        return API_KEY_PATH.read_text(encoding="utf-8").strip()
+    key = secrets.token_urlsafe(32)
+    API_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    API_KEY_PATH.write_text(key, encoding="utf-8")
+    logger.info("Generated new API key — saved to %s", API_KEY_PATH)
+    return key
 
 
 # ---------------------------------------------------------------------------

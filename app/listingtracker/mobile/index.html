@@ -8,6 +8,7 @@
 <meta name="theme-color" content="#1a1a2e">
 <title>Durham Listings</title>
 <link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon-192.png">
 <style>
 :root {
   --bg: #0f0f1a;
@@ -473,6 +474,10 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 .empty-state { text-align: center; padding: 60px 20px; color: var(--text2); }
 .empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+.retry-btn {
+  margin-top: 16px; padding: 10px 24px; background: var(--accent); color: #fff;
+  border: none; border-radius: 8px; font-size: 14px; cursor: pointer;
+}
 
 /* Sort dropdown */
 .sort-select {
@@ -501,7 +506,7 @@ body {
 <div id="loginScreen" class="login-screen">
   <h1>Durham Listings</h1>
   <p>Enter your API key to connect<br>to your listing tracker</p>
-  <input type="text" id="serverUrl" placeholder="Server URL (e.g. http://192.168.1.10:8000)">
+  <input type="text" id="serverUrl" placeholder="Server address">
   <input type="password" id="apiKeyInput" placeholder="API Key">
   <button onclick="doLogin()">Connect</button>
   <div class="or-divider">— or —</div>
@@ -513,7 +518,6 @@ body {
 <div id="qrScanOverlay">
   <div class="scan-hint">Point your camera at the QR code<br>shown on the desktop app</div>
   <video id="qrVideo" autoplay playsinline></video>
-  <canvas id="qrCanvas"></canvas>
   <button class="scan-cancel" onclick="stopQrScan()">Cancel</button>
 </div>
 
@@ -552,7 +556,7 @@ body {
 <!-- Detail Overlay -->
 <div class="detail-overlay" id="detailOverlay">
   <div class="detail-header">
-    <button class="back-btn" onclick="closeDetail()">&#8592;</button>
+    <button class="back-btn" onclick="history.back()">&#8592;</button>
     <div class="detail-title" id="detailTitle"></div>
     <button class="detail-fav-btn" id="detailFavBtn" onclick="toggleDetailFav()">&#9734;</button>
   </div>
@@ -561,13 +565,20 @@ body {
 
 <script>
 const API_TIMEOUT = 15000;
+const RETRIES = 2;
+const SOLD_STATUSES = new Set(['SOLD', 'SOLD_CONDITIONAL', 'TERMINATED']);
+const STATUS_LABELS = { FOR_SALE: 'For Sale', SOLD: 'Sold', SOLD_CONDITIONAL: 'Sold Conditional',
+  TERMINATED: 'Terminated', EXPIRED: 'Expired', DELISTED: 'Delisted', BLOCKED: 'Blocked', UNKNOWN: 'Unknown' };
+
 let serverUrl = '';
 let apiKey = '';
-let listings = [];
-let currentFilter = { city: null, favOnly: false, sort: 'date' };
+let listings = [];  // every active listing, as the server sent it; filtering and sorting happen here
+const currentFilter = { city: null, favOnly: false, sort: 'date' };
 let currentDetailId = null;
 let currentGalleryIndex = 0;
 let detailData = null;
+
+const $ = id => document.getElementById(id);
 
 // ------ Persistence ------
 function saveCredentials() {
@@ -582,56 +593,74 @@ function loadCredentials() {
     apiKey = localStorage.getItem('lt_key') || '';
   } catch(e) {}
 }
+function clearCredentials() {
+  try {
+    localStorage.removeItem('lt_server');
+    localStorage.removeItem('lt_key');
+  } catch(e) {}
+}
 
 // ------ API calls ------
+class ApiError extends Error {
+  constructor(status) { super(`HTTP ${status}`); this.status = status; }
+}
+
+// GETs are retried on network errors and server errors; a refused key is not retried.
 async function apiFetch(path, opts = {}) {
-  const url = serverUrl.replace(/\/+$/, '') + path;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), API_TIMEOUT);
-  try {
-    const resp = await fetch(url, {
-      signal: controller.signal,
-      ...opts,
-      headers: { ...(opts.headers || {}), 'X-API-Key': apiKey },
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    return await resp.json();
-  } finally {
-    clearTimeout(timer);
+  const attempts = (opts.method || 'GET') === 'GET' ? RETRIES + 1 : 1;
+  for (let attempt = 1; ; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), API_TIMEOUT);
+    try {
+      const resp = await fetch(serverUrl.replace(/\/+$/, '') + path, {
+        ...opts,
+        signal: controller.signal,
+        headers: { ...(opts.headers || {}), 'X-API-Key': apiKey },
+      });
+      if (!resp.ok) throw new ApiError(resp.status);
+      return await resp.json();
+    } catch(e) {
+      const permanent = e instanceof ApiError && e.status < 500;
+      if (permanent || attempt >= attempts) throw e;
+      await new Promise(r => setTimeout(r, 1000));
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
-// ------ Login ------
+// ------ Connecting ------
+// Loading the listings doubles as the key check, so connecting costs one request.
+async function connect() {
+  const data = await apiFetch('/api/listings');
+  saveCredentials();
+  $('loginScreen').style.display = 'none';
+  $('mainApp').style.display = 'block';
+  setListings(data.listings);
+}
+
+function showLogin(message) {
+  $('serverUrl').value = serverUrl;
+  $('apiKeyInput').value = apiKey;
+  $('mainApp').style.display = 'none';
+  $('loginScreen').style.display = '';
+  const errEl = $('loginError');
+  errEl.textContent = message || '';
+  errEl.style.display = message ? 'block' : 'none';
+}
+
 async function doLogin() {
-  const urlInput = document.getElementById('serverUrl');
-  const keyInput = document.getElementById('apiKeyInput');
-  const errEl = document.getElementById('loginError');
-  errEl.style.display = 'none';
-
-  serverUrl = urlInput.value.trim();
-  apiKey = keyInput.value.trim();
-
+  serverUrl = $('serverUrl').value.trim();
+  apiKey = $('apiKeyInput').value.trim();
   if (!serverUrl || !apiKey) {
-    errEl.textContent = 'Please fill in both fields';
-    errEl.style.display = 'block';
+    showLogin('Please fill in both fields');
     return;
   }
-
   try {
-    await apiFetch('/api/key-check');
-    saveCredentials();
-    showMainApp();
+    await connect();
   } catch(e) {
-    errEl.textContent = 'Connection failed. Check URL and API key.';
-    errEl.style.display = 'block';
+    showLogin('Connection failed. Check the server address and API key.');
   }
-}
-
-function showMainApp() {
-  document.getElementById('loginScreen').style.display = 'none';
-  document.getElementById('mainApp').style.display = 'block';
-  loadStats();
-  loadListings();
 }
 
 // ------ Connection menu ------
@@ -640,109 +669,106 @@ function toggleConnMenu(e) {
   e.stopPropagation();
   let host = serverUrl;
   try { host = new URL(serverUrl).host; } catch(err) {}
-  document.getElementById('connInfo').textContent = 'Connected to ' + host;
-  document.getElementById('connMenu').classList.toggle('open');
+  $('connInfo').textContent = 'Connected to ' + host;
+  $('connMenu').classList.toggle('open');
 }
-document.addEventListener('click', () => document.getElementById('connMenu').classList.remove('open'));
+document.addEventListener('click', () => $('connMenu').classList.remove('open'));
 
 function reconnect() {
   if (window.AndroidApp) { AndroidApp.reconnect(); return; }
-  refreshListings();
+  loadListings();
 }
 
 function disconnect() {
   if (window.AndroidApp) { AndroidApp.disconnect(); return; }
   if (!confirm('Disconnect from this server? You will need the QR code or API key to connect again.')) return;
-  try {
-    localStorage.removeItem('lt_server');
-    localStorage.removeItem('lt_key');
-  } catch(e) {}
+  clearCredentials();
   serverUrl = '';
   apiKey = '';
   listings = [];
-  document.getElementById('apiKeyInput').value = '';
-  document.getElementById('mainApp').style.display = 'none';
-  document.getElementById('loginScreen').style.display = '';
-}
-
-// ------ Stats ------
-async function loadStats() {
-  try {
-    const data = await apiFetch('/api/stats');
-    const bar = document.getElementById('statsBar');
-    bar.innerHTML = `
-      <div class="stat-card">
-        <div class="value">${data.total_listings}</div>
-        <div class="label">Listings</div>
-      </div>
-      <div class="stat-card">
-        <div class="value">${data.total_favorited}</div>
-        <div class="label">Favorites</div>
-      </div>
-      <div class="stat-card">
-        <div class="value">${data.price_stats.count > 0 ? '$' + Math.round(data.price_stats.average / 1000) + 'k' : '-'}</div>
-        <div class="label">Avg Price</div>
-      </div>
-      <div class="stat-card">
-        <div class="value">${data.price_stats.count > 0 ? '$' + Math.round(data.price_stats.min / 1000) + 'k' : '-'}</div>
-        <div class="label">Lowest</div>
-      </div>
-    `;
-
-    // City filter chips
-    const cities = Object.keys(data.cities);
-    const filtersEl = document.getElementById('cityFilters');
-    filtersEl.innerHTML = '<div class="chip active" onclick="filterCity(null, this)">All</div>' +
-      cities.map(c => `<div class="chip" onclick="filterCity('${c}', this)">${c} (${data.cities[c]})</div>`).join('');
-  } catch(e) {
-    console.error('Stats load failed:', e);
-  }
+  showLogin();
 }
 
 // ------ Listings ------
-async function loadListings(retryCount = 0) {
-  const container = document.getElementById('listingsContainer');
+async function loadListings() {
+  const container = $('listingsContainer');
   container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading listings...</div>';
-
   try {
-    let path = '/api/listings?sort=' + currentFilter.sort;
-    if (currentFilter.favOnly) path += '&favorites_only=true';
-    if (currentFilter.city) path += '&city=' + encodeURIComponent(currentFilter.city);
-
-    const data = await apiFetch(path);
-    listings = data.listings;
-    renderListings();
+    setListings((await apiFetch('/api/listings')).listings);
   } catch(e) {
-    if (retryCount < 2) {
-      await new Promise(r => setTimeout(r, 1000));
-      return loadListings(retryCount + 1);
-    }
-    container.innerHTML = '<div class="empty-state"><div class="icon">&#x26A0;</div><p>Failed to load listings</p><button onclick="loadListings()" style="margin-top:16px;padding:10px 24px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer">Retry</button></div>';
+    if (e.status === 401) { showLogin('This server no longer accepts the saved key. Pair again.'); return; }
+    container.innerHTML = errorState('Failed to load listings', 'loadListings()');
   }
 }
 
+function setListings(all) {
+  listings = all;
+  renderStats();
+  renderCityChips();
+  renderListings();
+}
+
+function renderStats() {
+  const prices = listings.map(l => l.price).filter(p => p > 10000);
+  const avg = prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : 0;
+  const thousands = p => prices.length ? '$' + Math.round(p / 1000) + 'k' : '-';
+  $('statsBar').innerHTML = [
+    [listings.length, 'Listings'],
+    [`<span id="favCount">${countFavorites()}</span>`, 'Favorites'],
+    [thousands(avg), 'Avg Price'],
+    [thousands(Math.min(...prices)), 'Lowest'],
+  ].map(([value, label]) => `
+      <div class="stat-card">
+        <div class="value">${value}</div>
+        <div class="label">${label}</div>
+      </div>`).join('');
+}
+
+function countFavorites() {
+  return listings.reduce((n, l) => n + (l.favorited ? 1 : 0), 0);
+}
+
+function renderCityChips() {
+  const counts = {};
+  for (const l of listings) {
+    const city = l.city || 'Unknown';
+    counts[city] = (counts[city] || 0) + 1;
+  }
+  const chip = (city, label) =>
+    `<div class="chip${city === currentFilter.city ? ' active' : ''}" data-city="${escHtml(city || '')}" onclick="filterCity(this)">${label}</div>`;
+  $('cityFilters').innerHTML = chip(null, 'All') + Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .map(([city, n]) => chip(city, `${escHtml(city)} (${n})`))
+    .join('');
+}
+
+const SORTS = {
+  date: (a, b) => (b.date_added || '').localeCompare(a.date_added || ''),
+  price: (a, b) => (a.price || Infinity) - (b.price || Infinity),
+  price_desc: (a, b) => (b.price || 0) - (a.price || 0),
+  city: (a, b) => (a.city || '').localeCompare(b.city || ''),
+};
+
+function visibleListings() {
+  return listings
+    .filter(l => (!currentFilter.favOnly || l.favorited) && (!currentFilter.city || (l.city || 'Unknown') === currentFilter.city))
+    .sort(SORTS[currentFilter.sort] || SORTS.date);
+}
+
 function renderListings() {
-  const container = document.getElementById('listingsContainer');
-  if (listings.length === 0) {
+  const shown = visibleListings();
+  const container = $('listingsContainer');
+  if (shown.length === 0) {
     container.innerHTML = '<div class="empty-state"><div class="icon">&#x1F3E0;</div><p>No listings found</p></div>';
     return;
   }
 
-  container.innerHTML = listings.map(l => {
-    const snap = l.snapshot || {};
-    const price = snap.list_price ? formatPrice(snap.list_price) : 'No price';
-    const status = snap.status || 'UNKNOWN';
-    const isSold = ['SOLD', 'SOLD_CONDITIONAL', 'TERMINATED'].includes(status);
-    const statusClass = status === 'FOR_SALE' ? 'for-sale' : (isSold ? 'sold' : '');
-    const statusLabel = formatStatus(status);
-    const beds = snap.beds ? snap.beds + ' bd' : '';
-    const baths = snap.baths ? snap.baths + ' ba' : '';
-    const sqft = snap.sqft_max || snap.sqft_min;
-    const sqftStr = sqft ? sqft.toLocaleString() + ' sqft' : '';
-    const meta = [beds, baths, sqftStr].filter(Boolean).join(' &middot; ');
-
+  container.innerHTML = shown.map(l => {
+    const st = statusInfo(l.status);
+    const meta = [l.beds && l.beds + ' bd', l.baths && l.baths + ' ba', l.sqft && l.sqft.toLocaleString() + ' sqft']
+      .filter(Boolean).join(' &middot; ');
     const imgHtml = l.image_url
-      ? `<img class="card-image" src="${escHtml(l.image_url)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=\\'card-image placeholder\\'>&#x1F3E0;</div>'">`
+      ? `<img class="card-image" src="${escHtml(l.image_url)}" alt="" loading="lazy" decoding="async" onerror="this.outerHTML='<div class=\\'card-image placeholder\\'>&#x1F3E0;</div>'">`
       : '<div class="card-image placeholder">&#x1F3E0;</div>';
 
     return `
@@ -751,53 +777,57 @@ function renderListings() {
         <div class="card-body">
           <div class="card-top">
             <div class="card-address">${escHtml(l.address)}${l.unit ? ' #' + escHtml(l.unit) : ''}</div>
-            <button class="card-fav ${l.favorited ? 'active' : ''}" onclick="event.stopPropagation(); toggleFav(${l.id})">${l.favorited ? '&#9733;' : '&#9734;'}</button>
+            <button class="card-fav ${l.favorited ? 'active' : ''}" id="fav-${l.id}" onclick="event.stopPropagation(); toggleFav(${l.id})">${l.favorited ? '&#9733;' : '&#9734;'}</button>
           </div>
-          <div class="card-meta">${meta || l.city || l.site}</div>
-          <div class="card-price ${isSold ? 'sold' : ''}">${price}</div>
+          <div class="card-meta">${meta || escHtml(l.city || l.site)}</div>
+          <div class="card-price ${st.sold ? 'sold' : ''}">${l.price ? formatPrice(l.price) : 'No price'}</div>
           <div class="card-badges">
-            <span class="badge ${statusClass}">${statusLabel}</span>
+            <span class="badge ${st.cls}">${st.label}</span>
             ${l.city ? `<span class="badge">${escHtml(l.city)}</span>` : ''}
-            ${snap.property_type ? `<span class="badge">${escHtml(snap.property_type)}</span>` : ''}
+            ${l.type ? `<span class="badge">${escHtml(l.type)}</span>` : ''}
           </div>
         </div>
-      </div>
-    `;
+      </div>`;
   }).join('');
 }
 
-async function refreshListings() {
-  await Promise.all([loadStats(), loadListings()]);
-}
-
 // ------ Filters ------
-function filterCity(city, el) {
-  currentFilter.city = city;
-  document.querySelectorAll('.filters .chip').forEach(c => c.classList.remove('active'));
-  if (el) el.classList.add('active');
-  loadListings();
+function filterCity(el) {
+  currentFilter.city = el.dataset.city || null;
+  document.querySelectorAll('.filters .chip').forEach(c => c.classList.toggle('active', c === el));
+  renderListings();
 }
 
 function toggleFavFilter() {
   currentFilter.favOnly = !currentFilter.favOnly;
-  document.getElementById('favFilterBtn').classList.toggle('active', currentFilter.favOnly);
-  loadListings();
+  $('favFilterBtn').classList.toggle('active', currentFilter.favOnly);
+  renderListings();
 }
 
 function changeSort() {
-  currentFilter.sort = document.getElementById('sortSelect').value;
-  loadListings();
+  currentFilter.sort = $('sortSelect').value;
+  renderListings();
 }
 
 // ------ Favorites ------
 async function toggleFav(id) {
   try {
-    const resp = await apiFetch(`/api/listings/${id}/favorite`, { method: 'POST' });
-    const card = listings.find(l => l.id === id);
-    if (card) card.favorited = resp.favorited;
-    renderListings();
+    const { favorited } = await apiFetch(`/api/listings/${id}/favorite`, { method: 'POST' });
+    const listing = listings.find(l => l.id === id);
+    if (listing) listing.favorited = favorited;
+
+    // Touch only what changed, so the other cards (and their photos) are left alone
+    const btn = $('fav-' + id);
+    if (currentFilter.favOnly) {
+      renderListings();
+    } else if (btn) {
+      btn.classList.toggle('active', favorited);
+      btn.innerHTML = favorited ? '&#9733;' : '&#9734;';
+    }
+    $('favCount').textContent = countFavorites();
+
     if (currentDetailId === id && detailData) {
-      detailData.favorited = resp.favorited;
+      detailData.favorited = favorited;
       updateDetailFavBtn();
     }
   } catch(e) {
@@ -806,47 +836,45 @@ async function toggleFav(id) {
 }
 
 // ------ Detail view ------
-async function openDetail(id, retryCount = 0) {
+// Opening a listing adds a history entry, so the phone's Back button closes it.
+async function openDetail(id) {
   currentDetailId = id;
-  const overlay = document.getElementById('detailOverlay');
-  const content = document.getElementById('detailContent');
-  const title = document.getElementById('detailTitle');
+  const overlay = $('detailOverlay');
+  const content = $('detailContent');
 
   content.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
-  title.textContent = 'Loading...';
+  $('detailTitle').textContent = 'Loading...';
+  if (!overlay.classList.contains('open')) history.pushState({ detail: true }, '');
   overlay.classList.add('open');
   document.body.style.overflow = 'hidden';
 
   try {
-    detailData = await apiFetch(`/api/listings/${id}`);
+    const data = await apiFetch(`/api/listings/${id}`);
+    if (currentDetailId !== id) return;  // closed or replaced while loading
+    detailData = data;
     renderDetail();
   } catch(e) {
-    if (retryCount < 2) {
-      await new Promise(r => setTimeout(r, 1000));
-      return openDetail(id, retryCount + 1);
-    }
-    content.innerHTML = `<div class="empty-state"><p>Failed to load listing</p><p style="font-size:11px;color:#666;margin-top:8px">${e.message || e}</p><button onclick="openDetail(${id})" style="margin-top:16px;padding:10px 24px;background:var(--accent);color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer">Retry</button></div>`;
+    if (currentDetailId === id) content.innerHTML = errorState('Failed to load listing', `openDetail(${id})`);
   }
 }
 
-function closeDetail() {
-  document.getElementById('detailOverlay').classList.remove('open');
+function hideDetail() {
+  $('detailOverlay').classList.remove('open');
   document.body.style.overflow = '';
   currentDetailId = null;
   detailData = null;
 }
 
+window.addEventListener('popstate', () => {
+  if ($('detailOverlay').classList.contains('open')) hideDetail();
+});
+
 function renderDetail() {
   const d = detailData;
   const snap = d.snapshot || {};
-  const title = document.getElementById('detailTitle');
-  title.textContent = d.address + (d.unit ? ' #' + d.unit : '');
-
+  const st = statusInfo(snap.status);
+  $('detailTitle').textContent = d.address + (d.unit ? ' #' + d.unit : '');
   updateDetailFavBtn();
-
-  const status = snap.status || 'UNKNOWN';
-  const isSold = ['SOLD', 'SOLD_CONDITIONAL', 'TERMINATED'].includes(status);
-  const statusClass = status === 'FOR_SALE' ? 'for-sale' : (isSold ? 'sold' : '');
 
   // Gallery
   let galleryHtml = '';
@@ -854,51 +882,51 @@ function renderDetail() {
     currentGalleryIndex = 0;
     galleryHtml = `
       <div class="detail-gallery" id="galleryContainer">
-        <img id="galleryImg" src="${escHtml(d.images[0])}" alt="" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22/>'">
+        <img id="galleryImg" src="${escHtml(d.images[0])}" alt="" decoding="async" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22/>'">
         ${d.images.length > 1 ? `
           <button class="gallery-nav prev" onclick="galleryNav(-1)">&#8249;</button>
           <button class="gallery-nav next" onclick="galleryNav(1)">&#8250;</button>
           <div class="gallery-counter" id="galleryCounter">1 / ${d.images.length}</div>
         ` : ''}
-      </div>
-    `;
+      </div>`;
   }
 
   // Info grid
+  const sqftLo = snap.sqft_min || snap.sqft_max;
+  const sqftRange = sqftLo && (sqftLo.toLocaleString() +
+    (snap.sqft_max && snap.sqft_max !== sqftLo ? ' - ' + snap.sqft_max.toLocaleString() : ''));
   const fields = [
-    { label: 'Status', value: formatStatus(status) },
-    { label: 'Beds', value: snap.beds },
-    { label: 'Baths', value: snap.baths },
-    { label: 'Sqft', value: snap.sqft_max || snap.sqft_min ? (snap.sqft_min || snap.sqft_max).toLocaleString() + (snap.sqft_max && snap.sqft_min && snap.sqft_max !== snap.sqft_min ? ' - ' + snap.sqft_max.toLocaleString() : '') : null },
-    { label: 'Maintenance', value: snap.maintenance_fee ? '$' + snap.maintenance_fee.toLocaleString() + '/mo' : null },
-    { label: 'Taxes', value: snap.taxes_annual ? '$' + snap.taxes_annual.toLocaleString() + '/yr' : null },
-    { label: 'Parking', value: snap.parking },
-    { label: 'Locker', value: snap.locker },
-    { label: 'Balcony', value: snap.balcony },
-    { label: 'Exposure', value: snap.exposure },
-    { label: 'Type', value: snap.property_type },
-    { label: 'Year Built', value: snap.year_built },
-    { label: 'Laundry', value: snap.ensuite_laundry },
-    { label: 'Outdoor', value: snap.outdoor_space },
-    { label: 'Possession', value: snap.possession_date },
-    { label: 'Days on Market', value: snap.days_on_market },
-    { label: 'Broker', value: snap.broker },
-    { label: 'Site Estimate', value: snap.site_estimate ? formatPrice(snap.site_estimate) : null },
-  ].filter(f => f.value != null && f.value !== '');
+    ['Status', st.label],
+    ['Beds', snap.beds],
+    ['Baths', snap.baths],
+    ['Sqft', sqftRange],
+    ['Maintenance', snap.maintenance_fee && '$' + snap.maintenance_fee.toLocaleString() + '/mo'],
+    ['Taxes', snap.taxes_annual && '$' + snap.taxes_annual.toLocaleString() + '/yr'],
+    ['Parking', snap.parking],
+    ['Locker', snap.locker],
+    ['Balcony', snap.balcony],
+    ['Exposure', snap.exposure],
+    ['Type', snap.property_type],
+    ['Year Built', snap.year_built],
+    ['Laundry', snap.ensuite_laundry],
+    ['Outdoor', snap.outdoor_space],
+    ['Possession', snap.possession_date],
+    ['Days on Market', snap.days_on_market],
+    ['Broker', snap.broker],
+    ['Site Estimate', snap.site_estimate && formatPrice(snap.site_estimate)],
+  ].filter(([, value]) => value != null && value !== '');
 
-  const infoHtml = fields.map(f => `
+  const infoHtml = fields.map(([label, value]) => `
     <div class="info-item">
-      <div class="info-label">${escHtml(f.label)}</div>
-      <div class="info-value">${escHtml(String(f.value))}</div>
-    </div>
-  `).join('');
+      <div class="info-label">${escHtml(label)}</div>
+      <div class="info-value">${escHtml(String(value))}</div>
+    </div>`).join('');
 
   // Peer stats
   let peerHtml = '';
-  if (d.peer_stats && d.peer_stats.peer_count) {
-    const ps = d.peer_stats;
-    const arrow = ps.discount_pct > 0 ? '&#x2193;' : '&#x2191;';
-    const color = ps.discount_pct > 0 ? 'var(--green)' : 'var(--red)';
+  const ps = d.peer_stats;
+  if (ps && ps.peer_count) {
+    const below = ps.discount_pct > 0;
     peerHtml = `
       <div class="section-title">Market Comparison</div>
       <div class="info-grid">
@@ -912,51 +940,37 @@ function renderDetail() {
         </div>
         <div class="info-item" style="grid-column: span 2">
           <div class="info-label">vs Market</div>
-          <div class="info-value" style="color:${color}">${arrow} ${Math.abs(ps.discount_pct).toFixed(1)}% ${ps.discount_pct > 0 ? 'below' : 'above'} average</div>
+          <div class="info-value" style="color:${below ? 'var(--green)' : 'var(--red)'}">${below ? '&#x2193;' : '&#x2191;'} ${Math.abs(ps.discount_pct).toFixed(1)}% ${below ? 'below' : 'above'} average</div>
         </div>
-      </div>
-    `;
+      </div>`;
   }
 
-  // Price history
+  // Price history (the server sends only priced entries, oldest first)
   let historyHtml = '';
   if (d.history && d.history.length > 1) {
-    const priceHistory = d.history.filter(h => h.list_price).reverse();
-    if (priceHistory.length > 1) {
-      historyHtml = `
-        <div class="section-title">Price History</div>
-        ${priceHistory.map(h => `
-          <div class="history-item">
-            <div class="history-date">${formatDate(h.fetched_at)}</div>
-            <div class="history-price">${formatPrice(h.list_price)}</div>
-          </div>
-        `).join('')}
-      `;
-    }
+    historyHtml = '<div class="section-title">Price History</div>' + d.history.slice().reverse().map(h => `
+      <div class="history-item">
+        <div class="history-date">${formatDate(h.fetched_at)}</div>
+        <div class="history-price">${formatPrice(h.list_price)}</div>
+      </div>`).join('');
   }
 
-  // Fee includes
-  let feeHtml = '';
-  if (snap.fee_includes) {
-    feeHtml = `
-      <div class="section-title">Fee Includes</div>
-      <div class="info-item" style="margin-bottom:12px">
-        <div class="info-value" style="font-size:13px; font-weight:400; line-height:1.5">${escHtml(snap.fee_includes)}</div>
-      </div>
-    `;
-  }
+  const feeHtml = snap.fee_includes ? `
+    <div class="section-title">Fee Includes</div>
+    <div class="info-item" style="margin-bottom:12px">
+      <div class="info-value" style="font-size:13px; font-weight:400; line-height:1.5">${escHtml(snap.fee_includes)}</div>
+    </div>` : '';
 
-  document.getElementById('detailContent').innerHTML = `
+  const place = [d.city, d.neighbourhood, d.building_name].filter(Boolean).map(escHtml).join(' &middot; ');
+
+  $('detailContent').innerHTML = `
     ${galleryHtml}
     <div class="detail-content">
-      <div class="detail-price ${isSold ? 'sold' : ''}">
+      <div class="detail-price ${st.sold ? 'sold' : ''}">
         ${snap.list_price ? formatPrice(snap.list_price) : 'No price'}
-        <span class="detail-status-badge badge ${statusClass}">${formatStatus(status)}</span>
+        <span class="detail-status-badge badge ${st.cls}">${st.label}</span>
       </div>
-      <div style="color: var(--text2); margin-top:4px; font-size:14px">
-        ${d.city || ''}${d.neighbourhood ? ' &middot; ' + escHtml(d.neighbourhood) : ''}
-        ${d.building_name ? ' &middot; ' + escHtml(d.building_name) : ''}
-      </div>
+      <div style="color: var(--text2); margin-top:4px; font-size:14px">${place}</div>
       ${d.mls_number ? `<div style="color:var(--text2); font-size:12px; margin-top:2px">MLS# ${escHtml(d.mls_number)}</div>` : ''}
 
       <div class="info-grid" style="margin-top:16px">${infoHtml}</div>
@@ -968,22 +982,21 @@ function renderDetail() {
       ${d.favorited ? '<div id="compSection"></div>' : ''}
 
       <a class="detail-link" href="${escHtml(d.url)}" target="_blank" rel="noopener">View on ${escHtml(d.site)}</a>
-    </div>
-  `;
+    </div>`;
 
   if (d.favorited) loadComparables(d.id);
 }
 
-async function loadComparables(listingId) {
-  const el = document.getElementById('compSection');
-  if (!el) return;
-  el.innerHTML = '<div class="section-title">Comparable Properties</div><div style="color:var(--text2);font-size:12px">Loading...</div>';
+const COMP_TITLE = '<div class="section-title">Comparable Properties</div>';
 
+async function loadComparables(listingId) {
+  const el = $('compSection');
+  if (!el) return;
+  el.innerHTML = COMP_TITLE + '<div style="color:var(--text2);font-size:12px">Loading...</div>';
   try {
-    const data = await apiFetch(`/api/listings/${listingId}/comparables`);
-    renderComparables(el, data);
+    renderComparables(el, await apiFetch(`/api/listings/${listingId}/comparables`));
   } catch(e) {
-    el.innerHTML = '<div class="section-title">Comparable Properties</div><div style="color:var(--text2);font-size:12px">Could not load comparables</div>';
+    el.innerHTML = COMP_TITLE + '<div style="color:var(--text2);font-size:12px">Could not load comparables</div>';
   }
 }
 
@@ -993,8 +1006,7 @@ function renderComparables(el, data) {
   const tol = data.tolerance || 25000;
 
   if (!comps.length) {
-    el.innerHTML = `
-      <div class="section-title">Comparable Properties</div>
+    el.innerHTML = COMP_TITLE + `
       <div style="color:var(--text2);font-size:12px;padding:12px 0">
         No comparables found yet. Similar properties priced above yours are
         discovered during scheduled checks.
@@ -1003,30 +1015,25 @@ function renderComparables(el, data) {
     return;
   }
 
-  let html = `<div class="section-title">Comparable Properties (${comps.length})</div>`;
-  html += `<div style="color:var(--text2);font-size:11px;margin-bottom:8px">Target: $${(favPrice-tol).toLocaleString()} &mdash; $${(favPrice+tol).toLocaleString()}</div>`;
+  let html = `<div class="section-title">Comparable Properties (${comps.length})</div>
+    <div style="color:var(--text2);font-size:11px;margin-bottom:8px">Target: $${(favPrice-tol).toLocaleString()} &mdash; $${(favPrice+tol).toLocaleString()}</div>`;
 
   for (const c of comps.slice(0, 10)) {
-    const inRange = c.in_range;
     const gap = c.price_gap;
-    let gapTxt, gapClass;
-    if (inRange) { gapTxt = 'IN RANGE!'; gapClass = 'hit'; }
-    else if (gap <= tol * 2) { gapTxt = '+$' + gap.toLocaleString(); gapClass = 'near'; }
-    else { gapTxt = '+$' + gap.toLocaleString(); gapClass = 'far'; }
-
-    const specs = [c.beds ? c.beds + ' bd' : '', c.baths ? c.baths + ' ba' : '', c.sqft ? c.sqft.toLocaleString() + ' sqft' : ''].filter(Boolean).join(' · ');
+    const gapTxt = c.in_range ? 'IN RANGE!' : '+$' + gap.toLocaleString();
+    const gapClass = c.in_range ? 'hit' : gap <= tol * 2 ? 'near' : 'far';
+    const specs = [c.beds && c.beds + ' bd', c.baths && c.baths + ' ba', c.sqft && c.sqft.toLocaleString() + ' sqft']
+      .filter(Boolean).join(' · ');
 
     let trendHtml = '';
     if (c.trend_pct_month != null) {
-      const arrow = c.trend_pct_month < 0 ? '&#x2193;' : '&#x2191;';
-      const cls = c.trend_pct_month < 0 ? 'down' : 'up';
-      trendHtml = `<div class="comp-trend ${cls}">${arrow} ${Math.abs(c.trend_pct_month).toFixed(1)}%/mo`;
-      if (c.predicted_target_date) trendHtml += ` &mdash; Est. target: ${c.predicted_target_date}`;
-      trendHtml += '</div>';
+      const down = c.trend_pct_month < 0;
+      trendHtml = `<div class="comp-trend ${down ? 'down' : 'up'}">${down ? '&#x2193;' : '&#x2191;'} ${Math.abs(c.trend_pct_month).toFixed(1)}%/mo` +
+        (c.predicted_target_date ? ` &mdash; Est. target: ${escHtml(c.predicted_target_date)}` : '') + '</div>';
     }
 
     html += `
-      <div class="comp-card ${inRange ? 'in-range' : ''}" onclick="openDetail(${c.listing_id})">
+      <div class="comp-card ${c.in_range ? 'in-range' : ''}" onclick="openDetail(${c.listing_id})">
         <div class="comp-addr">${escHtml(c.address)} &mdash; ${escHtml(c.city)}</div>
         <div class="comp-price-row">
           <span class="comp-price">$${c.current_price.toLocaleString()}</span>
@@ -1038,8 +1045,7 @@ function renderComparables(el, data) {
       </div>`;
   }
 
-  html += '<button class="comp-scan-btn" onclick="scanComparables()">Rescan Comparables</button>';
-  el.innerHTML = html;
+  el.innerHTML = html + '<button class="comp-scan-btn" onclick="scanComparables()">Rescan Comparables</button>';
 }
 
 async function scanComparables() {
@@ -1054,7 +1060,7 @@ async function scanComparables() {
 }
 
 function updateDetailFavBtn() {
-  const btn = document.getElementById('detailFavBtn');
+  const btn = $('detailFavBtn');
   if (!detailData) return;
   btn.innerHTML = detailData.favorited ? '&#9733;' : '&#9734;';
   btn.style.color = detailData.favorited ? 'var(--gold)' : 'var(--text2)';
@@ -1068,21 +1074,19 @@ function galleryNav(dir) {
   if (!detailData || !detailData.images) return;
   const imgs = detailData.images;
   currentGalleryIndex = (currentGalleryIndex + dir + imgs.length) % imgs.length;
-  document.getElementById('galleryImg').src = imgs[currentGalleryIndex];
-  const counter = document.getElementById('galleryCounter');
+  $('galleryImg').src = imgs[currentGalleryIndex];
+  const counter = $('galleryCounter');
   if (counter) counter.textContent = (currentGalleryIndex + 1) + ' / ' + imgs.length;
 }
 
 // Touch swipe on gallery
 let touchStartX = 0;
 document.addEventListener('touchstart', e => {
-  const gallery = document.getElementById('galleryContainer');
-  if (gallery && gallery.contains(e.target)) {
-    touchStartX = e.touches[0].clientX;
-  }
+  const gallery = $('galleryContainer');
+  if (gallery && gallery.contains(e.target)) touchStartX = e.touches[0].clientX;
 });
 document.addEventListener('touchend', e => {
-  const gallery = document.getElementById('galleryContainer');
+  const gallery = $('galleryContainer');
   if (gallery && gallery.contains(e.target) && touchStartX) {
     const diff = e.changedTouches[0].clientX - touchStartX;
     if (Math.abs(diff) > 50) galleryNav(diff < 0 ? 1 : -1);
@@ -1090,51 +1094,48 @@ document.addEventListener('touchend', e => {
   }
 });
 
-// Back button closes detail
-window.addEventListener('popstate', () => {
-  if (document.getElementById('detailOverlay').classList.contains('open')) {
-    closeDetail();
-  }
-});
-
 // ------ Helpers ------
+function statusInfo(status) {
+  const s = status || 'UNKNOWN';
+  const sold = SOLD_STATUSES.has(s);
+  return { label: STATUS_LABELS[s] || s, sold, cls: s === 'FOR_SALE' ? 'for-sale' : sold ? 'sold' : '' };
+}
+function errorState(message, retryCall) {
+  return `<div class="empty-state"><div class="icon">&#x26A0;</div><p>${escHtml(message)}</p>` +
+    `<button class="retry-btn" onclick="${retryCall}">Retry</button></div>`;
+}
 function formatPrice(p) {
   if (!p) return 'N/A';
   return '$' + Number(p).toLocaleString('en-CA', { maximumFractionDigits: 0 });
-}
-function formatStatus(s) {
-  const map = { FOR_SALE: 'For Sale', SOLD: 'Sold', SOLD_CONDITIONAL: 'Sold Conditional',
-    TERMINATED: 'Terminated', EXPIRED: 'Expired', DELISTED: 'Delisted',
-    BLOCKED: 'Blocked', UNKNOWN: 'Unknown' };
-  return map[s] || s;
 }
 function formatDate(d) {
   if (!d) return '';
   try { return new Date(d).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }); }
   catch { return d; }
 }
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escHtml(s) {
-  if (!s) return '';
-  const div = document.createElement('div');
-  div.textContent = String(s);
-  return div.innerHTML;
+  return s == null ? '' : String(s).replace(/[&<>"']/g, c => HTML_ESCAPES[c]);
 }
 
-// ------ QR Scanner ------
+// ------ QR Scanner (browser version; the Android app scans natively) ------
 let qrStream = null;
-let qrScanning = false;
+let qrDetector = null;
 
 async function startQrScan() {
-  const overlay = document.getElementById('qrScanOverlay');
-  const video = document.getElementById('qrVideo');
+  if (!('BarcodeDetector' in window)) {
+    alert('This browser cannot scan QR codes. Enter the connection details manually.');
+    return;
+  }
+  const overlay = $('qrScanOverlay');
+  const video = $('qrVideo');
   overlay.classList.add('active');
-
   try {
     qrStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
     });
     video.srcObject = qrStream;
-    qrScanning = true;
+    qrDetector = qrDetector || new BarcodeDetector({ formats: ['qr_code'] });
     scanQrFrame();
   } catch (err) {
     overlay.classList.remove('active');
@@ -1143,9 +1144,7 @@ async function startQrScan() {
 }
 
 function stopQrScan() {
-  qrScanning = false;
-  const overlay = document.getElementById('qrScanOverlay');
-  overlay.classList.remove('active');
+  $('qrScanOverlay').classList.remove('active');
   if (qrStream) {
     qrStream.getTracks().forEach(t => t.stop());
     qrStream = null;
@@ -1153,27 +1152,13 @@ function stopQrScan() {
 }
 
 async function scanQrFrame() {
-  if (!qrScanning) return;
-  const video = document.getElementById('qrVideo');
-  const canvas = document.getElementById('qrCanvas');
-
+  if (!qrStream) return;
+  const video = $('qrVideo');
   if (video.readyState === video.HAVE_ENOUGH_DATA) {
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0);
-
-    // Use BarcodeDetector API (Chrome Android 83+)
-    if ('BarcodeDetector' in window) {
-      try {
-        const detector = new BarcodeDetector({ formats: ['qr_code'] });
-        const barcodes = await detector.detect(canvas);
-        if (barcodes.length > 0) {
-          handleQrResult(barcodes[0].rawValue);
-          return;
-        }
-      } catch (e) { /* fall through */ }
-    }
+    try {
+      const codes = await qrDetector.detect(video);
+      if (codes.length > 0) { handleQrResult(codes[0].rawValue); return; }
+    } catch (e) { /* try the next frame */ }
   }
   requestAnimationFrame(scanQrFrame);
 }
@@ -1182,63 +1167,33 @@ function handleQrResult(raw) {
   stopQrScan();
   try {
     const data = JSON.parse(raw);
-    if (data.url && data.key) {
-      serverUrl = data.url;
-      apiKey = data.key;
-      document.getElementById('serverUrl').value = serverUrl;
-      document.getElementById('apiKeyInput').value = apiKey;
-      // Auto-connect
-      doLogin();
-    } else {
-      alert('Invalid QR code. Please scan the code shown in the desktop app.');
-    }
+    if (!data.url || !data.key) throw new Error('missing fields');
+    serverUrl = data.url;
+    apiKey = data.key;
+    $('serverUrl').value = serverUrl;
+    $('apiKeyInput').value = apiKey;
+    doLogin();
   } catch (e) {
     alert('Could not read QR code. Please scan the code shown in the desktop app.');
   }
 }
 
 // ------ Init ------
-// Support auto-connect via #key=API_KEY (preferred: a fragment is never sent to the server)
-// or ?key=API_KEY[&url=SERVER_URL]
-const urlParams = new URLSearchParams(location.search);
+// The Android app passes the key in the fragment (#key=...), which is never sent to the server.
 const hashParams = new URLSearchParams(location.hash.slice(1));
-const paramKey = hashParams.get('key') || urlParams.get('key');
-const paramUrl = hashParams.get('url') || urlParams.get('url');
-if (paramKey) {
-  apiKey = paramKey;
-  serverUrl = paramUrl || location.origin;
-  saveCredentials();
+if (hashParams.get('key')) {
+  apiKey = hashParams.get('key');
+  serverUrl = hashParams.get('url') || location.origin;
   history.replaceState(null, '', location.pathname);
-  apiFetch('/api/key-check')
-    .then(() => showMainApp())
-    .catch(() => {
-      document.getElementById('serverUrl').value = serverUrl;
-      document.getElementById('apiKeyInput').value = apiKey;
-    });
 } else {
   loadCredentials();
-  if (serverUrl && apiKey) {
-    apiFetch('/api/key-check')
-      .then(() => showMainApp())
-      .catch(() => {
-        document.getElementById('serverUrl').value = serverUrl;
-        document.getElementById('apiKeyInput').value = apiKey;
-      });
-  } else {
-    if (location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.hostname === '10.0.2.2') {
-      document.getElementById('serverUrl').value = location.origin;
-    }
-  }
+}
+if (serverUrl && apiKey) {
+  connect().catch(() => showLogin('Could not connect to the saved server.'));
+} else if (['localhost', '127.0.0.1', '10.0.2.2'].includes(location.hostname)) {
+  $('serverUrl').value = location.origin;
 }
 
-// ------ PWA install prompt ------
-let deferredPrompt;
-window.addEventListener('beforeinstallprompt', e => {
-  e.preventDefault();
-  deferredPrompt = e;
-});
-
-// Register service worker
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
 }

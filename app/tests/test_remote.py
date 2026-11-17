@@ -35,17 +35,16 @@ def test_urls_list_the_public_address_first_only_when_the_mapping_works(monkeypa
 
 
 def test_pair_info_is_refused_for_callers_on_other_machines(monkeypatch):
-    import asyncio
     from types import SimpleNamespace
 
     from fastapi import HTTPException
 
     from listingtracker import api
 
-    monkeypatch.setattr(api, "_get_api_key", lambda: "secret")
+    monkeypatch.setattr(api, "api_key", lambda: "secret")
 
     def ask_from(host):
-        return asyncio.run(api.pair_info(SimpleNamespace(client=SimpleNamespace(host=host))))
+        return api.pair_info(SimpleNamespace(client=SimpleNamespace(host=host)))
 
     assert ask_from("127.0.0.1")["key"] == "secret"
     for outsider in ("192.168.2.50", "100.101.102.103", "203.0.113.9"):

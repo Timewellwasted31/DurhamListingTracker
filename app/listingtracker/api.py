@@ -5,31 +5,29 @@ Run directly:
 
 Or with uvicorn:
     uvicorn listingtracker.api:app --host 0.0.0.0 --port 8000
+
+Endpoints that touch the database are plain `def`, so FastAPI runs them in its thread pool
+instead of blocking the event loop that both the HTTP and HTTPS servers share.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import hmac
 import logging
 import os
-import secrets
 import sys
-from datetime import datetime
+from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, Response
 
-from listingtracker.paths import (
-    ensure_directories, use_installed_browsers, DB_PATH, IMAGE_CACHE_DIR,
-    DATA_DIR, LOGS_DIR, MPL_CACHE_DIR, ROOT,
-)
+from listingtracker.paths import ensure_directories, use_installed_browsers, LOGS_DIR, MPL_CACHE_DIR
+from listingtracker.remote import api_key
 
 use_installed_browsers()
 os.environ["MPLCONFIGDIR"] = str(MPL_CACHE_DIR)
@@ -37,96 +35,62 @@ os.environ["MPLCONFIGDIR"] = str(MPL_CACHE_DIR)
 logger = logging.getLogger(__name__)
 
 MOBILE_DIR = Path(__file__).parent / "mobile"
+KEEP_ALIVE_SECONDS = 60  # uvicorn's 5 s default forces a fresh TLS handshake after a short pause
 
 app = FastAPI(title="Durham Listing Tracker", version="1.0.0")
-
+# Images are excluded by the middleware's defaults, so only JSON and the page are compressed
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["X-API-Key"],
 )
 
-API_KEY_PATH = DATA_DIR / "api_key.txt"
-
-
-def _load_or_create_api_key() -> str:
-    """Load the API key from disk, or generate one on first run."""
-    if API_KEY_PATH.exists():
-        return API_KEY_PATH.read_text(encoding="utf-8").strip()
-    key = secrets.token_urlsafe(32)
-    API_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    API_KEY_PATH.write_text(key, encoding="utf-8")
-    logger.info("Generated new API key — saved to %s", API_KEY_PATH)
-    return key
-
-
-_api_key: str = ""
 _http_port: int = 8000
 _remote = None  # listingtracker.remote.RemoteAccess once main() has started HTTPS
 
 
-def _get_api_key() -> str:
-    global _api_key
-    if not _api_key:
-        _api_key = _load_or_create_api_key()
-    return _api_key
-
-
 async def verify_api_key(request: Request):
-    """Check the X-API-Key header or ?key= query param."""
-    key = request.headers.get("X-API-Key") or request.query_params.get("key")
-    if not key or not hmac.compare_digest(key, _get_api_key()):
+    key = request.headers.get("X-API-Key")
+    if not key or not hmac.compare_digest(key, api_key()):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
+def _compact(d: dict) -> dict:
+    """Drop empty fields; the page treats a missing field the same as null."""
+    return {k: v for k, v in d.items() if v is not None}
+
+
 # ---------------------------------------------------------------------------
-# Static files: mobile app
+# Static files: mobile app (no key needed; every API call needs it)
 # ---------------------------------------------------------------------------
 
-@app.get("/", response_class=HTMLResponse)
-async def mobile_index(request: Request):
-    """Serve the mobile app — no auth required for the shell, API calls need the key."""
-    index = MOBILE_DIR / "index.html"
-    if not index.exists():
-        raise HTTPException(status_code=404, detail="Mobile app not found")
-    return HTMLResponse(index.read_text(encoding="utf-8"))
+def _serve_static(path: str, filename: str, cache: str, media_type: str | None = None) -> None:
+    def serve(request: Request):
+        f = MOBILE_DIR / filename
+        try:
+            st = f.stat()
+        except FileNotFoundError:
+            raise HTTPException(status_code=404) from None
+        resp = FileResponse(f, stat_result=st, media_type=media_type, headers={"Cache-Control": cache})
+        # FileResponse sends an ETag but never answers 304 itself
+        if request.headers.get("if-none-match") == resp.headers["etag"]:
+            return Response(status_code=304, headers={"ETag": resp.headers["etag"], "Cache-Control": cache})
+        return resp
+
+    app.add_api_route(path, serve, methods=["GET"], include_in_schema=False)
 
 
-@app.get("/manifest.json")
-async def manifest():
-    f = MOBILE_DIR / "manifest.json"
-    if f.exists():
-        return JSONResponse(
-            content=__import__("json").loads(f.read_text(encoding="utf-8")),
-            media_type="application/manifest+json",
-        )
-    raise HTTPException(status_code=404)
-
-
-@app.get("/sw.js")
-async def service_worker():
-    f = MOBILE_DIR / "sw.js"
-    if f.exists():
-        return FileResponse(f, media_type="application/javascript")
-    raise HTTPException(status_code=404)
-
-
-@app.get("/icon-192.png")
-async def icon_192():
-    f = MOBILE_DIR / "icon-192.png"
-    if f.exists():
-        return FileResponse(f, media_type="image/png")
-    raise HTTPException(status_code=404)
-
-
-@app.get("/icon-512.png")
-async def icon_512():
-    f = MOBILE_DIR / "icon-512.png"
-    if f.exists():
-        return FileResponse(f, media_type="image/png")
-    raise HTTPException(status_code=404)
+# no-cache = revalidate each time (a 304 when unchanged), so updates reach phones at once
+for _path, _file, _cache, _media in (
+    ("/", "index.html", "no-cache", None),
+    ("/sw.js", "sw.js", "no-cache", None),
+    ("/manifest.json", "manifest.json", "max-age=86400", "application/manifest+json"),
+    ("/icon-192.png", "icon-192.png", "max-age=86400", None),
+    ("/icon-512.png", "icon-512.png", "max-age=86400", None),
+):
+    _serve_static(_path, _file, _cache, _media)
 
 
 # ---------------------------------------------------------------------------
@@ -134,119 +98,88 @@ async def icon_512():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/listings")
-async def list_listings(
-    favorites_only: bool = False,
-    city: Optional[str] = None,
-    status: Optional[str] = None,
-    sort: str = "date",
-    _=Depends(verify_api_key),
-):
-    from listingtracker.db import get_all_listings, get_all_latest_snapshots, get_listing_images
+def list_listings(_=Depends(verify_api_key)):
+    """Every active listing in summary form; the page filters, sorts and totals them itself."""
+    from listingtracker.db import get_all_listings, get_all_latest_snapshots, get_first_image_urls
 
-    listings = get_all_listings(active_only=True)
     snapshots = get_all_latest_snapshots()
+    images = get_first_image_urls()
+    return {"listings": [
+        _summary(lst, snapshots.get(lst.id), images.get(lst.id))
+        for lst in get_all_listings(active_only=True)
+    ]}
 
-    results = []
-    for lst in listings:
-        if favorites_only and not lst.favorited:
-            continue
-        if city and lst.city.lower() != city.lower():
-            continue
 
-        snap = snapshots.get(lst.id)
-
-        if status and snap:
-            if snap.status.value.lower() != status.lower():
-                continue
-
-        images = get_listing_images(lst.id)
-        first_image = images[0]["url"] if images else None
-
-        results.append({
-            "id": lst.id,
-            "url": lst.url,
-            "site": lst.site,
-            "mls_number": lst.mls_number,
-            "address": lst.address or "Unknown",
-            "unit": lst.unit,
-            "building_name": lst.building_name,
-            "city": lst.city,
-            "neighbourhood": lst.neighbourhood,
-            "date_added": lst.date_added.isoformat() if lst.date_added else None,
-            "favorited": lst.favorited,
-            "image_url": first_image,
-            "snapshot": _snap_dict(snap) if snap else None,
-        })
-
-    if sort == "price":
-        results.sort(key=lambda r: (r["snapshot"] or {}).get("list_price") or 999999999)
-    elif sort == "price_desc":
-        results.sort(key=lambda r: (r["snapshot"] or {}).get("list_price") or 0, reverse=True)
-    elif sort == "city":
-        results.sort(key=lambda r: r["city"])
-    else:
-        results.sort(key=lambda r: r["date_added"] or "", reverse=True)
-
-    return {"listings": results, "count": len(results)}
+def _summary(lst, snap, image_url) -> dict:
+    card = {
+        "id": lst.id,
+        "address": lst.address or "Unknown",
+        "unit": lst.unit,
+        "city": lst.city,
+        "site": lst.site,
+        "favorited": lst.favorited,
+        "date_added": lst.date_added.isoformat() if lst.date_added else None,
+        "image_url": image_url,
+    }
+    if snap:
+        card.update(
+            status=snap.status.value,
+            price=snap.list_price,
+            beds=snap.beds,
+            baths=snap.baths,
+            sqft=snap.sqft_max or snap.sqft_min,
+            type=snap.property_type,
+        )
+    return _compact(card)
 
 
 @app.get("/api/listings/{listing_id}")
-async def get_listing(listing_id: int, _=Depends(verify_api_key)):
-    from listingtracker.db import (
-        get_listing_by_id, get_latest_snapshot, get_snapshots_for_listing,
-        get_listing_images, get_peer_stats,
-    )
+def get_listing(listing_id: int, _=Depends(verify_api_key)):
+    from listingtracker.db import get_listing_by_id, get_snapshots_for_listing, get_listing_images, get_peer_stats
 
     lst = get_listing_by_id(listing_id)
     if not lst:
         raise HTTPException(status_code=404, detail="Listing not found")
 
-    snap = get_latest_snapshot(listing_id)
-    history = get_snapshots_for_listing(listing_id)
-    images = get_listing_images(listing_id)
+    history = get_snapshots_for_listing(listing_id)  # oldest first
+    snap = history[-1] if history else None
 
     peers = {}
     if snap and snap.list_price and snap.beds:
         sqft = snap.sqft_max or snap.sqft_min or 0
-        peers = get_peer_stats(
-            listing_id, lst.city, snap.beds, snap.list_price, sqft
-        )
+        peers = get_peer_stats(listing_id, lst.city, snap.beds, snap.list_price, sqft)
 
-    return {
-        "id": lst.id,
-        "url": lst.url,
-        "site": lst.site,
-        "mls_number": lst.mls_number,
-        "address": lst.address,
-        "unit": lst.unit,
-        "building_name": lst.building_name,
-        "city": lst.city,
-        "neighbourhood": lst.neighbourhood,
-        "date_added": lst.date_added.isoformat() if lst.date_added else None,
-        "favorited": lst.favorited,
-        "user_notes": lst.user_notes,
+    return _compact({
+        **asdict(lst),
         "snapshot": _snap_dict(snap) if snap else None,
-        "history": [_snap_dict(s) for s in history],
-        "images": [img["url"] for img in images],
+        "history": [{"fetched_at": s.fetched_at, "list_price": s.list_price} for s in history if s.list_price],
+        "images": [img["url"] for img in get_listing_images(listing_id)],
         "peer_stats": peers,
-    }
+    })
+
+
+_SNAPSHOT_INTERNAL = ("id", "listing_id", "raw_html_path", "parse_errors")
+
+
+def _snap_dict(snap) -> dict:
+    d = asdict(snap)
+    for field in _SNAPSHOT_INTERNAL:
+        del d[field]
+    d["status"] = snap.status.value
+    return _compact(d)
 
 
 @app.post("/api/listings/{listing_id}/favorite")
-async def toggle_favorite(listing_id: int, _=Depends(verify_api_key)):
+def toggle_favorite(listing_id: int, _=Depends(verify_api_key)):
     from listingtracker.db import toggle_favorite as db_toggle
 
-    new_state = db_toggle(listing_id)
-    return {"listing_id": listing_id, "favorited": new_state}
+    return {"listing_id": listing_id, "favorited": db_toggle(listing_id)}
 
 
 @app.get("/api/listings/{listing_id}/comparables")
-async def get_comparables(listing_id: int, _=Depends(verify_api_key)):
-    from listingtracker.db import (
-        get_listing_by_id, get_comparables_for_favorite, get_latest_snapshot,
-        get_snapshots_for_listing,
-    )
-    from listingtracker.comparables import analyze_price_trend, predict_target_date, PRICE_TOLERANCE
+def get_comparables(listing_id: int, _=Depends(verify_api_key)):
+    from listingtracker.db import get_listing_by_id, get_comparables_for_favorite, get_latest_snapshot
+    from listingtracker.comparables import PRICE_TOLERANCE
 
     lst = get_listing_by_id(listing_id)
     if not lst:
@@ -257,118 +190,32 @@ async def get_comparables(listing_id: int, _=Depends(verify_api_key)):
     fav_snap = get_latest_snapshot(listing_id)
     fav_price = fav_snap.list_price if fav_snap else 0
 
-    comps = get_comparables_for_favorite(listing_id)
     result = []
-    for c in comps:
+    for c in get_comparables_for_favorite(listing_id):
         comp_snap = get_latest_snapshot(c["listing_id"])
         if not comp_snap or not comp_snap.list_price:
             continue
-
-        history = get_snapshots_for_listing(c["listing_id"])
-        trend = c.get("price_trend_pct_per_month")
-        predicted = c.get("predicted_target_date")
-
-        price_history = [
-            {"date": s.fetched_at, "price": s.list_price}
-            for s in history if s.list_price and s.list_price > 0
-        ]
-
         gap = comp_snap.list_price - fav_price if fav_price else 0
-        in_range = gap <= PRICE_TOLERANCE
-
-        result.append({
+        result.append(_compact({
             "listing_id": c["listing_id"],
             "address": c["address"],
             "city": c["city"],
-            "url": c["url"],
             "similarity_score": c["similarity_score"],
             "current_price": comp_snap.list_price,
-            "favorite_price": fav_price,
             "price_gap": gap,
-            "in_range": in_range,
+            "in_range": gap <= PRICE_TOLERANCE,
             "beds": comp_snap.beds,
             "baths": comp_snap.baths,
             "sqft": comp_snap.sqft_max or comp_snap.sqft_min,
-            "trend_pct_month": trend,
-            "predicted_target_date": predicted,
-            "notes": c.get("notes", ""),
-            "price_history": price_history,
-        })
+            "trend_pct_month": c.get("price_trend_pct_per_month"),
+            "predicted_target_date": c.get("predicted_target_date"),
+        }))
 
     return {"comparables": result, "favorite_price": fav_price, "tolerance": PRICE_TOLERANCE}
 
 
-@app.get("/api/images/{listing_id}")
-async def listing_images(listing_id: int, _=Depends(verify_api_key)):
-    from listingtracker.db import get_listing_images
-    images = get_listing_images(listing_id)
-    return {"images": [img["url"] for img in images]}
-
-
-@app.get("/api/image-proxy/{listing_id}/{index}")
-async def image_proxy(listing_id: int, index: int, _=Depends(verify_api_key)):
-    """Serve a locally-cached listing image."""
-    img_dir = IMAGE_CACHE_DIR / str(listing_id)
-    if not img_dir.exists():
-        raise HTTPException(status_code=404, detail="No cached images")
-
-    files = sorted(img_dir.iterdir())
-    if index < 0 or index >= len(files):
-        raise HTTPException(status_code=404, detail="Image index out of range")
-
-    f = files[index]
-    ext = f.suffix.lower()
-    media = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-             ".png": "image/png", ".webp": "image/webp"}.get(ext, "image/jpeg")
-    return FileResponse(f, media_type=media)
-
-
-@app.get("/api/stats")
-async def stats(_=Depends(verify_api_key)):
-    from listingtracker.db import get_all_listings, get_all_latest_snapshots
-    from listingtracker.models import Status
-
-    all_listings = get_all_listings(active_only=True)
-    snaps = get_all_latest_snapshots()
-
-    cities: dict[str, int] = {}
-    statuses: dict[str, int] = {}
-    total_favorited = 0
-    prices = []
-
-    for lst in all_listings:
-        if lst.favorited:
-            total_favorited += 1
-        city = lst.city or "Unknown"
-        cities[city] = cities.get(city, 0) + 1
-
-        snap = snaps.get(lst.id)
-        if snap:
-            st = snap.status.value
-            statuses[st] = statuses.get(st, 0) + 1
-            if snap.list_price and snap.list_price > 10000:
-                prices.append(snap.list_price)
-
-    avg_price = sum(prices) / len(prices) if prices else 0
-    min_price = min(prices) if prices else 0
-    max_price = max(prices) if prices else 0
-
-    return {
-        "total_listings": len(all_listings),
-        "total_favorited": total_favorited,
-        "cities": dict(sorted(cities.items(), key=lambda x: -x[1])),
-        "statuses": statuses,
-        "price_stats": {
-            "average": round(avg_price),
-            "min": round(min_price),
-            "max": round(max_price),
-            "count": len(prices),
-        },
-    }
-
-
 @app.post("/api/scan-comparables")
-async def scan_comparables(_=Depends(verify_api_key)):
+def scan_comparables(_=Depends(verify_api_key)):
     """Trigger a comparable property scan for all favorites."""
     from listingtracker.db import (
         get_favorited_listings, get_all_listings, get_all_latest_snapshots,
@@ -399,8 +246,7 @@ async def scan_comparables(_=Depends(verify_api_key)):
             if not comp_snap:
                 continue
 
-            history = get_snapshots_for_listing(listing_id)
-            trend = analyze_price_trend(history)
+            trend = analyze_price_trend(get_snapshots_for_listing(listing_id))
             predicted = None
             notes = ""
 
@@ -425,19 +271,19 @@ async def scan_comparables(_=Depends(verify_api_key)):
 
 
 @app.get("/api/key-check")
-async def key_check(_=Depends(verify_api_key)):
+def key_check(_=Depends(verify_api_key)):
     """Confirms the key, and tells a paired device where the server can currently be reached."""
     return {"ok": True, "urls": _remote.urls() if _remote else []}
 
 
 @app.get("/api/pair-info")
-async def pair_info(request: Request):
+def pair_info(request: Request):
     """Pairing data for the desktop app's QR code. It includes the API key, so it only answers
     requests made from this computer."""
     if not request.client or request.client.host not in ("127.0.0.1", "::1"):
         raise HTTPException(status_code=403, detail="Pairing data is only available on this computer")
     from listingtracker.remote import lan_ip
-    info = {"url": f"http://{lan_ip()}:{_http_port}", "key": _get_api_key()}
+    info = {"url": f"http://{lan_ip()}:{_http_port}", "key": api_key()}
     if _remote:
         info.update(
             urls=_remote.urls(),
@@ -445,38 +291,6 @@ async def pair_info(request: Request):
             remote={"status": _remote.status, "message": _remote.message},
         )
     return info
-
-
-def _snap_dict(snap) -> dict:
-    if not snap:
-        return {}
-    return {
-        "id": snap.id,
-        "fetched_at": snap.fetched_at,
-        "status": snap.status.value if hasattr(snap.status, "value") else str(snap.status),
-        "list_price": snap.list_price,
-        "maintenance_fee": snap.maintenance_fee,
-        "taxes_annual": snap.taxes_annual,
-        "beds": snap.beds,
-        "baths": snap.baths,
-        "sqft_min": snap.sqft_min,
-        "sqft_max": snap.sqft_max,
-        "parking": snap.parking,
-        "locker": snap.locker,
-        "balcony": snap.balcony,
-        "exposure": snap.exposure,
-        "days_on_market": snap.days_on_market,
-        "site_estimate": snap.site_estimate,
-        "broker": snap.broker,
-        "fee_includes": snap.fee_includes,
-        "property_type": snap.property_type,
-        "year_built": snap.year_built,
-        "ensuite_laundry": snap.ensuite_laundry,
-        "outdoor_space": snap.outdoor_space,
-        "possession_date": snap.possession_date,
-        "rent_controlled": snap.rent_controlled,
-        "power_of_sale": snap.power_of_sale,
-    }
 
 
 def setup_logging() -> None:
@@ -514,19 +328,18 @@ def main() -> None:
 
     global _http_port, _remote
     _http_port = args.port
-    api_key = _get_api_key()
     _remote = RemoteAccess(args.https_port, ensure_certificate(), use_upnp=not args.no_upnp)
     logger.info("API server starting on %s:%d (HTTPS on %d)", args.host, args.port, args.https_port)
-    logger.info("API key: %s", api_key)
+    logger.info("API key: %s", api_key())
     logger.info("Mobile app: http://localhost:%d", args.port)
 
     # proxy_headers off: the loopback check in pair_info must see the real peer address
+    common = dict(host=args.host, log_level="info", proxy_headers=False,
+                  timeout_keep_alive=KEEP_ALIVE_SECONDS)
     servers = [
-        uvicorn.Server(uvicorn.Config(
-            app, host=args.host, port=args.port, log_level="info", proxy_headers=False)),
-        uvicorn.Server(uvicorn.Config(
-            app, host=args.host, port=args.https_port, log_level="info", proxy_headers=False,
-            ssl_certfile=str(CERT_PATH), ssl_keyfile=str(KEY_PATH))),
+        uvicorn.Server(uvicorn.Config(app, port=args.port, **common)),
+        uvicorn.Server(uvicorn.Config(app, port=args.https_port, **common,
+                                      ssl_certfile=str(CERT_PATH), ssl_keyfile=str(KEY_PATH))),
     ]
 
     async def serve() -> None:

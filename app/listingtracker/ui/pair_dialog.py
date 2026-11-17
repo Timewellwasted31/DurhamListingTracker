@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import json
-import socket
 import urllib.request
 from io import BytesIO
-from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QImage
@@ -14,28 +12,10 @@ from PySide6.QtWidgets import (
     QApplication, QDialog, QGridLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
-from listingtracker.paths import DATA_DIR
+from listingtracker.remote import api_key, lan_ip
 
 
 DIALOG_WIDTH = 420
-
-
-def _get_local_ip() -> str:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
-
-
-def _get_api_key() -> str:
-    key_path = DATA_DIR / "api_key.txt"
-    if key_path.exists():
-        return key_path.read_text(encoding="utf-8").strip()
-    return ""
 
 
 def _fetch_pair_info(port: int) -> dict:
@@ -88,7 +68,7 @@ class PairDialog(QDialog):
             self.pair_data = info
         else:
             hint_text = "The API server is not running, so only this Wi-Fi network will work"
-            self.pair_data = {"url": f"http://{_get_local_ip()}:{port}", "key": _get_api_key()}
+            self.pair_data = {"url": f"http://{lan_ip()}:{port}", "key": api_key()}
         server_url = (self.pair_data.get("urls") or [self.pair_data["url"]])[0]
         self._generate_qr(json.dumps(self.pair_data, separators=(",", ":")))
 

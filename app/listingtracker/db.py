@@ -775,6 +775,16 @@ def get_listing_images(listing_id: int) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_first_image_urls() -> dict[int, str]:
+    """{listing_id: url of its first image} for every listing that has images, in one query."""
+    with _connect() as conn:
+        # SQLite takes the bare `url` column from the row that holds MIN(position)
+        rows = conn.execute(
+            "SELECT listing_id, url, MIN(position) FROM listing_images GROUP BY listing_id"
+        ).fetchall()
+        return {r["listing_id"]: r["url"] for r in rows}
+
+
 def update_image_local_path(image_id: int, local_path: str) -> None:
     with _connect() as conn:
         conn.execute(

@@ -1,8 +1,13 @@
 package com.durhamlistings.app;
 
+import android.app.Activity;
+import android.content.Context;
 import android.net.http.SslCertificate;
 import android.os.Build;
 import android.os.Bundle;
+import android.webkit.WebStorage;
+
+import androidx.appcompat.app.AlertDialog;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -24,6 +29,7 @@ import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
@@ -91,13 +97,26 @@ final class ServerLink {
         }
     }
 
+    // One factory per pinned certificate: connections, and TLS sessions, are only reused
+    // between requests that share a factory.
+    private static String factoryFp;
+    private static SSLSocketFactory factory;
+
+    private static synchronized SSLSocketFactory pinnedFactory(String fingerprint) throws Exception {
+        if (factory == null || !fingerprint.equals(factoryFp)) {
+            SSLContext ctx = SSLContext.getInstance("TLS");
+            ctx.init(null, new TrustManager[]{new PinnedTrustManager(fingerprint)}, null);
+            factory = ctx.getSocketFactory();
+            factoryFp = fingerprint;
+        }
+        return factory;
+    }
+
     static HttpURLConnection open(String url, String fingerprint) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         if (conn instanceof HttpsURLConnection && fingerprint != null && !fingerprint.isEmpty()) {
             HttpsURLConnection https = (HttpsURLConnection) conn;
-            SSLContext ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, new TrustManager[]{new PinnedTrustManager(fingerprint)}, null);
-            https.setSSLSocketFactory(ctx.getSocketFactory());
+            https.setSSLSocketFactory(pinnedFactory(fingerprint));
             // The server is addressed by IP; its identity is the pinned certificate, not a name.
             https.setHostnameVerifier((host, session) -> {
                 try {
@@ -137,6 +156,24 @@ final class ServerLink {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /** Forgets the paired server, including what its page stored in the web view. */
+    static void forget(Context context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply();
+        WebStorage.getInstance().deleteAllData();
+    }
+
+    static void confirmForget(Activity activity, Runnable onForgotten) {
+        new AlertDialog.Builder(activity)
+                .setTitle(R.string.disconnect_title)
+                .setMessage(R.string.disconnect_message)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.disconnect, (d, w) -> {
+                    forget(activity);
+                    onForgotten.run();
+                })
+                .show();
     }
 
     static String normalize(String fingerprint) {

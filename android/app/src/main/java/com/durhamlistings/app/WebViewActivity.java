@@ -1,7 +1,6 @@
 package com.durhamlistings.app;
 
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Bundle;
@@ -9,12 +8,12 @@ import android.view.KeyEvent;
 import android.webkit.JavascriptInterface;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
-import android.webkit.WebStorage;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
-import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
@@ -31,18 +30,12 @@ public class WebViewActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_webview);
 
+        // Only PairActivity starts this screen, always after reaching the server
         serverUrl = getIntent().getStringExtra("server_url");
         apiKey = getIntent().getStringExtra("api_key");
         certFp = getIntent().getStringExtra("cert_fp");
 
         if (serverUrl == null || apiKey == null) {
-            SharedPreferences prefs = getSharedPreferences(ServerLink.PREFS, MODE_PRIVATE);
-            serverUrl = prefs.getString(ServerLink.KEY_SERVER, "");
-            apiKey = prefs.getString(ServerLink.KEY_API, "");
-            certFp = prefs.getString(ServerLink.KEY_FP, "");
-        }
-
-        if (serverUrl.isEmpty() || apiKey.isEmpty()) {
             startActivity(new Intent(this, PairActivity.class));
             finish();
             return;
@@ -65,8 +58,8 @@ public class WebViewActivity extends AppCompatActivity {
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
-        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
-        settings.setMediaPlaybackRequiresUserGesture(false);
+        // Listing photos come from the listing sites; allow plain-http photos but never scripts
+        settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         settings.setAllowFileAccess(false);
 
         webView.setWebViewClient(new WebViewClient() {
@@ -86,11 +79,12 @@ public class WebViewActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onReceivedError(WebView view, int errorCode,
-                                        String description, String failingUrl) {
-                // If the server becomes unreachable, offer a retry; the pairing itself is kept
-                if (errorCode == ERROR_CONNECT || errorCode == ERROR_TIMEOUT ||
-                        errorCode == ERROR_HOST_LOOKUP) {
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                // If the server becomes unreachable, offer a retry; the pairing itself is kept.
+                // Failed photos and other sub-resources are left to the page.
+                int code = error.getErrorCode();
+                if (request.isForMainFrame() && (code == ERROR_CONNECT || code == ERROR_TIMEOUT ||
+                        code == ERROR_HOST_LOOKUP)) {
                     Intent intent = new Intent(WebViewActivity.this, PairActivity.class);
                     intent.putExtra(PairActivity.EXTRA_CONNECTION_LOST, true);
                     startActivity(intent);
@@ -119,12 +113,12 @@ public class WebViewActivity extends AppCompatActivity {
         public void disconnect() {
             runOnUiThread(() -> {
                 if (!fromServerPage()) return;
-                new AlertDialog.Builder(WebViewActivity.this)
-                        .setTitle(R.string.disconnect_title)
-                        .setMessage(R.string.disconnect_message)
-                        .setNegativeButton(android.R.string.cancel, null)
-                        .setPositiveButton(R.string.disconnect, (d, w) -> forgetServer())
-                        .show();
+                ServerLink.confirmForget(WebViewActivity.this, () -> {
+                    webView.clearCache(true);
+                    startActivity(new Intent(WebViewActivity.this, PairActivity.class)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
+                    finish();
+                });
             });
         }
     }
@@ -133,15 +127,6 @@ public class WebViewActivity extends AppCompatActivity {
     private boolean fromServerPage() {
         String current = webView.getUrl();
         return current != null && current.startsWith(serverUrl + "/");
-    }
-
-    private void forgetServer() {
-        getSharedPreferences(ServerLink.PREFS, MODE_PRIVATE).edit().clear().apply();
-        webView.clearCache(true);
-        WebStorage.getInstance().deleteAllData();
-        startActivity(new Intent(this, PairActivity.class)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
-        finish();
     }
 
     private void setupSwipeRefresh() {
