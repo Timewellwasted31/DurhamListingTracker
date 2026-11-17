@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Durham Listings</string>
+    <string name="pair_title">Durham Listings</string>
+    <string name="pair_subtitle">Connect to your listing tracker</string>
+    <string name="scan_qr">Scan QR Code</string>
+    <string name="or_divider">— or —</string>
+    <string name="server_url_hint">Server URL (e.g. http://100.x.x.x:8000)</string>
+    <string name="api_key_hint">API Key</string>
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="scanning">Scanning&#8230;</string>
+    <string name="connecting">Connecting&#8230;</string>
+    <string name="connection_failed">Connection failed. Check the URL and API key.</string>
+    <string name="invalid_qr">Invalid QR code. Scan the code shown in the desktop app.</string>
+    <string name="camera_denied">Camera permission is required to scan QR codes.</string>
+    <string name="same_network_hint">Connect from anywhere via Tailscale VPN</string>
+</resources>

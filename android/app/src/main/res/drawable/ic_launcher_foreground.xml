@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- House shape -->
+    <path
+        android:fillColor="#FF4A90D9"
+        android:pathData="M54,24L24,48L24,80L44,80L44,64L64,64L64,80L84,80L84,48Z" />
+
+    <!-- Roof accent -->
+    <path
+        android:fillColor="#FF1565C0"
+        android:pathData="M54,24L24,48L30,48L54,30L78,48L84,48Z" />
+
+    <!-- Door -->
+    <path
+        android:fillColor="#FF0D1117"
+        android:pathData="M49,80L49,60L59,60L59,80Z" />
+
+    <!-- Window left -->
+    <path
+        android:fillColor="#FFE6EDF3"
+        android:pathData="M32,52L42,52L42,62L32,62Z" />
+
+    <!-- Window right -->
+    <path
+        android:fillColor="#FFE6EDF3"
+        android:pathData="M66,52L76,52L76,62L66,62Z" />
+
+    <!-- Magnifying glass -->
+    <path
+        android:fillColor="#FF4CAF50"
+        android:strokeColor="#FF4CAF50"
+        android:strokeWidth="2.5"
+        android:pathData="M70,70m-8,0a8,8 0,1 1,16 0a8,8 0,1 1,-16 0" />
+    <path
+        android:strokeColor="#FF4CAF50"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M76,76L84,84" />
+</vector>

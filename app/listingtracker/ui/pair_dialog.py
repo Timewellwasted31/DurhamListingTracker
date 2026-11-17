@@ -84,7 +84,7 @@ class PairDialog(QDialog):
         info_layout.addStretch()
         layout.addLayout(info_layout)
 
-        hint = QLabel("Both devices must be on the same Wi-Fi network")
+        hint = QLabel("Connect from anywhere via Tailscale VPN")
         hint.setAlignment(Qt.AlignCenter)
         hint.setStyleSheet("font-size: 11px; color: #666; font-style: italic;")
         layout.addWidget(hint)

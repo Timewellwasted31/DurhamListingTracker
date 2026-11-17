@@ -430,15 +430,26 @@ async def key_check(_=Depends(verify_api_key)):
 async def pair_info():
     """Return pairing data (server URL hint + API key) for QR code generation.
     No auth required — called by the desktop app itself to build the QR."""
-    import socket
+    import socket, subprocess
     local_ip = "127.0.0.1"
+    # Prefer Tailscale IP for remote access
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
-        s.close()
+        result = subprocess.run(
+            [r"C:\Program Files\Tailscale\tailscale.exe", "ip", "-4"],
+            capture_output=True, text=True, timeout=3
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            local_ip = result.stdout.strip()
     except Exception:
         pass
+    if local_ip == "127.0.0.1":
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            pass
     return {"url": f"http://{local_ip}:8000", "key": _get_api_key()}
 
 
