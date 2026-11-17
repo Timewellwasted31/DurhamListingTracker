@@ -111,6 +111,7 @@ body {
   cursor: pointer;
 }
 .conn-menu button.danger { color: var(--red); }
+.conn-menu button[hidden] { display: none; }
 
 /* Filter chips */
 .filters {
@@ -330,9 +331,11 @@ body {
   margin-bottom: 12px;
 }
 
+.history-summary { font-size: 13px; margin: -4px 0 10px; }
 .history-item {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   padding: 10px 12px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -340,7 +343,29 @@ body {
   margin-bottom: 6px;
 }
 .history-date { font-size: 13px; color: var(--text2); }
-.history-price { font-size: 15px; font-weight: 600; }
+.history-note { font-size: 11px; color: var(--text2); opacity: .75; margin-top: 2px; }
+.history-price { font-size: 15px; font-weight: 600; text-align: right; }
+.history-change { font-size: 12px; font-weight: 600; text-align: right; margin-top: 2px; }
+.down { color: var(--green); }
+.up { color: var(--red); }
+
+.forecast-card {
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 14px;
+}
+.forecast-head { display: flex; align-items: baseline; gap: 8px; }
+.forecast-when { font-size: 20px; font-weight: 700; color: var(--accent2); }
+.forecast-conf {
+  margin-left: auto; font-size: 11px; font-weight: 600; text-transform: uppercase;
+  padding: 2px 8px; border-radius: 10px; background: var(--surface2); color: var(--text2);
+}
+.forecast-conf.high { color: var(--green); }
+.forecast-conf.medium { color: var(--gold); }
+.forecast-window { font-size: 12px; color: var(--text2); margin-top: 2px; }
+.forecast-price { font-size: 14px; margin-top: 10px; }
+.forecast-basis { font-size: 12px; color: var(--text2); margin-top: 8px; line-height: 1.5; }
 
 .detail-link {
   display: block;
@@ -375,8 +400,6 @@ body {
 .comp-gap.hit { color: var(--green); }
 .comp-specs { font-size: 11px; color: var(--text2); margin-top: 2px; }
 .comp-trend { font-size: 11px; margin-top: 4px; }
-.comp-trend.down { color: var(--green); }
-.comp-trend.up { color: var(--red); }
 .comp-score { font-size: 11px; color: var(--text2); margin-left: auto; }
 .comp-scan-btn {
   display: block; width: 100%; padding: 10px; margin-top: 12px;
@@ -540,6 +563,7 @@ body {
       <div class="conn-menu" id="connMenu">
         <div class="conn-info" id="connInfo"></div>
         <button onclick="reconnect()">Reconnect</button>
+        <button id="updateBtn" onclick="AndroidApp.checkForUpdate()" hidden>Check for app update</button>
         <button class="danger" onclick="disconnect()">Disconnect</button>
       </div>
     </div>
@@ -670,6 +694,8 @@ function toggleConnMenu(e) {
   let host = serverUrl;
   try { host = new URL(serverUrl).host; } catch(err) {}
   $('connInfo').textContent = 'Connected to ' + host;
+  // Only app versions that can update themselves have this
+  $('updateBtn').hidden = !(window.AndroidApp && AndroidApp.checkForUpdate);
   $('connMenu').classList.toggle('open');
 }
 document.addEventListener('click', () => $('connMenu').classList.remove('open'));
@@ -911,7 +937,8 @@ function renderDetail() {
     ['Laundry', snap.ensuite_laundry],
     ['Outdoor', snap.outdoor_space],
     ['Possession', snap.possession_date],
-    ['Days on Market', snap.days_on_market],
+    ['Listed', formatDate(d.list_date)],
+    ['Days on Market', d.days_on_market],
     ['Broker', snap.broker],
     ['Site Estimate', snap.site_estimate && formatPrice(snap.site_estimate)],
   ].filter(([, value]) => value != null && value !== '');
@@ -945,15 +972,8 @@ function renderDetail() {
       </div>`;
   }
 
-  // Price history (the server sends only priced entries, oldest first)
-  let historyHtml = '';
-  if (d.history && d.history.length > 1) {
-    historyHtml = '<div class="section-title">Price History</div>' + d.history.slice().reverse().map(h => `
-      <div class="history-item">
-        <div class="history-date">${formatDate(h.fetched_at)}</div>
-        <div class="history-price">${formatPrice(h.list_price)}</div>
-      </div>`).join('');
-  }
+  const historyHtml = renderPriceHistory(d.price_history || []);
+  const forecastHtml = renderForecast(d.next_drop);
 
   const feeHtml = snap.fee_includes ? `
     <div class="section-title">Fee Includes</div>
@@ -976,8 +996,9 @@ function renderDetail() {
       <div class="info-grid" style="margin-top:16px">${infoHtml}</div>
 
       ${peerHtml}
-      ${feeHtml}
+      ${forecastHtml}
       ${historyHtml}
+      ${feeHtml}
 
       ${d.favorited ? '<div id="compSection"></div>' : ''}
 
@@ -985,6 +1006,59 @@ function renderDetail() {
     </div>`;
 
   if (d.favorited) loadComparables(d.id);
+}
+
+// Asking prices as [date, price] pairs, one per change, oldest first; shown newest first
+function renderPriceHistory(points) {
+  if (!points.length) return '';
+  const [firstDate, firstPrice] = points[0];
+  const current = points[points.length - 1][1];
+  const cuts = points.filter((p, i) => i && p[1] < points[i - 1][1]).length;
+  const change = current - firstPrice;
+  const summary = points.length < 2
+    ? `No price changes since it was listed on ${formatDate(firstDate)}`
+    : `<span class="${change < 0 ? 'down' : 'up'}">${change < 0 ? 'Down' : 'Up'} ${formatPrice(Math.abs(change))} (${pct(change, firstPrice)})</span>` +
+      ` since ${formatDate(firstDate)} &middot; ${cuts} cut${cuts === 1 ? '' : 's'}`;
+
+  const rows = points.map(([date, price], i) => {
+    if (!i) return { date, price, note: 'Listed', change: '' };
+    const [prevDate, prevPrice] = points[i - 1];
+    const diff = price - prevPrice;
+    return {
+      date, price,
+      note: daysBetween(prevDate, date) + ' days later',
+      change: `<div class="history-change ${diff < 0 ? 'down' : 'up'}">${signedMoney(diff)} (${pct(diff, prevPrice)})</div>`,
+    };
+  }).reverse();
+
+  return `<div class="section-title">Price History</div>
+    <div class="history-summary">${summary}</div>` + rows.map(r => `
+      <div class="history-item">
+        <div>
+          <div class="history-date">${formatDate(r.date)}</div>
+          <div class="history-note">${r.note}</div>
+        </div>
+        <div>
+          <div class="history-price">${formatPrice(r.price)}</div>
+          ${r.change}
+        </div>
+      </div>`).join('');
+}
+
+function renderForecast(f) {
+  if (!f) return '';
+  const when = f.overdue ? 'Due now' : 'Around ' + formatDate(f.expected);
+  const range = f.overdue ? `Likely by ${formatDate(f.latest)}` : `Likely between ${formatDate(f.earliest)} and ${formatDate(f.latest)}`;
+  return `<div class="section-title">Next Price Drop</div>
+    <div class="forecast-card">
+      <div class="forecast-head">
+        <div class="forecast-when">${when}</div>
+        <div class="forecast-conf ${escHtml(f.confidence)}">${escHtml(f.confidence)} confidence</div>
+      </div>
+      <div class="forecast-window">${range}</div>
+      <div class="forecast-price">To about <b>${formatPrice(f.price)}</b> <span class="down">(&minus;${f.pct}%)</span></div>
+      <div class="forecast-basis">${escHtml(f.basis)}</div>
+    </div>`;
 }
 
 const COMP_TITLE = '<div class="section-title">Comparable Properties</div>';
@@ -1020,16 +1094,16 @@ function renderComparables(el, data) {
 
   for (const c of comps.slice(0, 10)) {
     const gap = c.price_gap;
-    const gapTxt = c.in_range ? 'IN RANGE!' : '+$' + gap.toLocaleString();
+    const gapTxt = signedMoney(gap) + (c.in_range ? ' &middot; IN RANGE' : '');
     const gapClass = c.in_range ? 'hit' : gap <= tol * 2 ? 'near' : 'far';
     const specs = [c.beds && c.beds + ' bd', c.baths && c.baths + ' ba', c.sqft && c.sqft.toLocaleString() + ' sqft']
       .filter(Boolean).join(' · ');
 
     let trendHtml = '';
-    if (c.trend_pct_month != null) {
+    if (c.trend_pct_month) {  // a listing that never changed price has no trend to show
       const down = c.trend_pct_month < 0;
       trendHtml = `<div class="comp-trend ${down ? 'down' : 'up'}">${down ? '&#x2193;' : '&#x2191;'} ${Math.abs(c.trend_pct_month).toFixed(1)}%/mo` +
-        (c.predicted_target_date ? ` &mdash; Est. target: ${escHtml(c.predicted_target_date)}` : '') + '</div>';
+        (c.predicted_target_date ? ` &mdash; in range by ~${formatDate(c.predicted_target_date)}` : '') + '</div>';
     }
 
     html += `
@@ -1108,11 +1182,16 @@ function formatPrice(p) {
   if (!p) return 'N/A';
   return '$' + Number(p).toLocaleString('en-CA', { maximumFractionDigits: 0 });
 }
+// A bare YYYY-MM-DD is a calendar date; read it as local midnight, not UTC (a day early here)
+function toDate(d) { return new Date(d.length === 10 ? d + 'T00:00' : d); }
 function formatDate(d) {
   if (!d) return '';
-  try { return new Date(d).toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' }); }
-  catch { return d; }
+  const date = toDate(d);
+  return isNaN(date) ? d : date.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' });
 }
+function daysBetween(a, b) { return Math.round((toDate(b) - toDate(a)) / 86400000); }
+function signedMoney(n) { return (n < 0 ? '&minus;' : '+') + formatPrice(Math.abs(n)); }
+function pct(part, whole) { return (Math.abs(part) / whole * 100).toFixed(1) + '%'; }
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escHtml(s) {
   return s == null ? '' : String(s).replace(/[&<>"']/g, c => HTML_ESCAPES[c]);

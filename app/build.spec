@@ -31,6 +31,8 @@ a = Analysis(
     datas=[
         (patchright_driver, "patchright/driver"),
         (patchright_browsers_src, patchright_browsers_dest),
+        # The phone page, and the phone app build the server offers for updating
+        ("listingtracker/mobile", "listingtracker/mobile"),
     ] + mpl_datas,
     hiddenimports=[
         "patchright",
@@ -43,7 +45,9 @@ a = Analysis(
         "plyer.platforms.win.notification",
         "curl_cffi",
         "qrcode",
-    ] + mpl_hiddenimports,
+    ] + mpl_hiddenimports
+      # The phone server: uvicorn picks its event loop, HTTP and lifespan modules by name at runtime
+      + collect_submodules("uvicorn"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

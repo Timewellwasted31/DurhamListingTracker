@@ -24,6 +24,7 @@ from listingtracker.db import (
     update_listing,
     save_listing_images,
     get_listing_images,
+    save_price_history,
 )
 from listingtracker.adapters.base import SiteAdapter, clean_parsed
 from listingtracker.adapters.strata import StrataAdapter
@@ -309,6 +310,7 @@ def fetch_listing(
 
         snap_id = add_snapshot(snap)
         snap.id = snap_id
+        save_price_history(listing.id, parsed.get("list_date"), parsed.get("price_history") or [])
 
         raw_path = _store_html(html, snap_id)
         snap.raw_html_path = raw_path

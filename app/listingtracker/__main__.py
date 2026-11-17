@@ -69,17 +69,39 @@ def main() -> None:
     logger.info("Starting Durham Listing Tracker")
 
     from listingtracker.db import init_db
+    from listingtracker.pricehistory import backfill_in_background
 
     init_db()
+    backfill_in_background()
 
     from listingtracker.ui.main_window import MainWindow
 
     window = MainWindow()
-    server = listen_for_other_instances(window)  # keep a reference for the app's lifetime
+    instances = listen_for_other_instances(window)  # keep a reference for the app's lifetime
     window.show()
+    phone = start_phone_server()
     exit_code = app.exec()
-    server.close()
+    if phone:
+        phone.stop()  # also takes the port forward off the router
+    instances.close()
     sys.exit(exit_code)
+
+
+def start_phone_server():
+    """Serve the phone app while the desktop app is open, unless the settings turn it off.
+    Returns the running server, or None."""
+    from listingtracker.config import load_config
+
+    if not load_config().get("phone_server", True):
+        return None
+    try:
+        from listingtracker.api import PhoneServer
+        phone = PhoneServer(access_log=False)
+    except Exception:
+        logging.getLogger("listingtracker").exception("Phone server could not start")
+        return None
+    phone.start()
+    return phone
 
 
 def show_running_instance(name: str = INSTANCE_NAME) -> bool:

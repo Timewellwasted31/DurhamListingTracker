@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QApplication, QDialog, QGridLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
-from listingtracker.remote import api_key, lan_ip
+from listingtracker.remote import HTTP_PORT, api_key, lan_ip
 
 
 DIALOG_WIDTH = 420
@@ -28,7 +28,7 @@ def _fetch_pair_info(port: int) -> dict:
 
 
 class PairDialog(QDialog):
-    def __init__(self, parent=None, port: int = 8000):
+    def __init__(self, parent=None, port: int = HTTP_PORT):
         super().__init__(parent)
         self.setWindowTitle("Pair Mobile Device")
         self.setFixedWidth(DIALOG_WIDTH)

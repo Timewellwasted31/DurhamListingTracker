@@ -76,6 +76,7 @@ class WahiAdapter(SiteAdapter):
                 result["sqft_max"] = None
             result["days_on_market"] = self._safe_int(str(listing.get("daysOnMarket", "")))
             result["broker"] = listing.get("brokerageName")
+            result["list_date"], result["price_history"] = self._price_history(listing)
             status_raw = listing.get("status", "")
             if status_raw == "A":
                 result["status"] = Status.FOR_SALE.value
@@ -132,6 +133,25 @@ class WahiAdapter(SiteAdapter):
             result["power_of_sale"] = True
         result["parse_errors"] = "; ".join(errors) if errors else None
         return result
+
+    @staticmethod
+    def _price_history(listing: dict) -> tuple[Optional[str], list[tuple[str, float]]]:
+        """(list date, [(date, price)] oldest first) from the listing's price updates.
+
+        A relisted home can carry updates from before its current list date; the opening price
+        is only added when it is known to start on the list date."""
+        list_date = (listing.get("listDate") or "")[:10] or None
+        updates = sorted(
+            (u for u in listing.get("priceUpdates") or [] if u.get("date") and u.get("newPrice")),
+            key=lambda u: u["date"],
+        )
+        points = []
+        if list_date and updates and updates[0].get("oldPrice") and list_date <= updates[0]["date"][:10]:
+            points.append((list_date, float(updates[0]["oldPrice"])))
+        elif list_date and not updates and listing.get("listPrice"):
+            points.append((list_date, float(listing["listPrice"])))
+        points += [(u["date"][:10], float(u["newPrice"])) for u in updates]
+        return list_date, points
 
     def _extract_next_data(self, html: str) -> Optional[dict]:
         m = re.search(r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)

@@ -1,17 +1,13 @@
 """Comparable property tracker — finds similar-but-pricier properties for favorites.
 
 For each favorited listing, finds properties in the same city with similar
-characteristics (beds, baths, sqft) but at a higher price. Tracks their price
-history and predicts when they might drop to within ±$25k of the favorite.
+characteristics (beds, baths, sqft) but at a higher price, and forecasts from
+their price history when they might drop to within ±$25k of the favorite.
 """
 
 from __future__ import annotations
 
 import logging
-import math
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Optional
 
 from listingtracker.models import Listing, Snapshot, Status
 
@@ -24,38 +20,6 @@ SQFT_TOLERANCE = 0.20
 
 # Maximum price premium to track (200% of favorite's price)
 MAX_PRICE_RATIO = 2.0
-
-
-@dataclass
-class Comparable:
-    """A comparable property linked to a favorite."""
-    id: Optional[int] = None
-    favorite_id: int = 0
-    listing_id: int = 0
-    similarity_score: float = 0.0
-    first_seen: Optional[str] = None
-    last_checked: Optional[str] = None
-    predicted_target_date: Optional[str] = None
-    price_trend_pct_per_month: Optional[float] = None
-    notes: str = ""
-
-
-@dataclass
-class ComparableDetail:
-    """Comparable enriched with listing + snapshot data for display."""
-    comparable: Comparable
-    listing: Listing
-    snapshot: Snapshot
-    favorite_price: float
-    price_gap: float
-    monthly_trend: Optional[float] = None
-    months_to_target: Optional[float] = None
-    predicted_date: Optional[str] = None
-    price_history: list = None
-
-    def __post_init__(self):
-        if self.price_history is None:
-            self.price_history = []
 
 
 def find_comparables_for_favorite(
@@ -174,82 +138,51 @@ def _types_similar(a: str, b: str) -> bool:
     return a_low in condo_terms and b_low in condo_terms
 
 
-def analyze_price_trend(snapshots: list[Snapshot]) -> Optional[float]:
-    """Calculate monthly price trend from snapshot history.
+def scan_comparables(favorites: list[Listing]) -> tuple[int, list[str]]:
+    """Find and store comparables for each favorite, with each one's price trend and the date
+    its forecast cuts would bring it into range. Returns (comparables stored, in-range alerts)."""
+    from listingtracker import pricehistory
+    from listingtracker.db import (
+        get_all_listings, get_all_latest_snapshots, get_latest_snapshot,
+        get_snapshots_for_listing, upsert_comparable, delete_stale_comparables,
+    )
 
-    Returns percentage change per month (negative = dropping).
-    Needs at least 2 snapshots with valid prices spanning > 7 days.
-    """
-    priced = [
-        (s.fetched_at, s.list_price)
-        for s in snapshots
-        if s.list_price and s.list_price > 0 and s.fetched_at
-    ]
-    if len(priced) < 2:
-        return None
+    all_listings = get_all_listings(active_only=True)
+    by_id = {lst.id: lst for lst in all_listings}
+    all_snapshots = get_all_latest_snapshots()
+    market = pricehistory.market_pattern()
+    count, alerts = 0, []
 
-    priced.sort(key=lambda x: x[0])
+    for fav in favorites:
+        fav_snap = all_snapshots.get(fav.id) or get_latest_snapshot(fav.id)
+        if not fav_snap or not fav_snap.list_price:
+            continue
+        target = fav_snap.list_price + PRICE_TOLERANCE
 
-    first_date = _parse_date(priced[0][0])
-    last_date = _parse_date(priced[-1][0])
-    if not first_date or not last_date:
-        return None
+        for listing_id, score in find_comparables_for_favorite(fav, fav_snap, all_listings, all_snapshots):
+            comp_snap = all_snapshots[listing_id]
+            summary = pricehistory.summarize(listing_id, get_snapshots_for_listing(listing_id), market)
+            trend = pricehistory.trend_pct_per_month(summary.points)
+            gap = comp_snap.list_price - fav_snap.list_price
 
-    days = (last_date - first_date).days
-    if days < 7:
-        return None
+            predicted, notes = None, ""
+            if gap <= PRICE_TOLERANCE:
+                notes = f"IN RANGE! Gap: ${gap:,.0f}"
+                alerts.append(
+                    f"{by_id[listing_id].address}: now ${comp_snap.list_price:,.0f}, "
+                    f"${gap:,.0f} above your ${fav_snap.list_price:,.0f} favorite"
+                )
+            elif summary.forecast and summary.forecast.confidence != "low":
+                # Only a listing that has cut before has a pace of its own worth projecting
+                when = pricehistory.target_date(comp_snap.list_price, target, summary.forecast)
+                if when:
+                    predicted = when.isoformat()
+                    notes = f"Forecast cuts may reach your range by {predicted}"
 
-    months = days / 30.44
-    if months < 0.25:
-        return None
+            upsert_comparable(fav.id, listing_id, score, predicted_target_date=predicted,
+                              price_trend_pct_per_month=trend, notes=notes)
+            count += 1
 
-    first_price = priced[0][1]
-    last_price = priced[-1][1]
-
-    if first_price <= 0:
-        return None
-
-    total_change_pct = ((last_price - first_price) / first_price) * 100
-    return total_change_pct / months
-
-
-def predict_target_date(
-    current_price: float,
-    target_price: float,
-    monthly_trend_pct: float,
-    tolerance: float = PRICE_TOLERANCE,
-) -> Optional[str]:
-    """Predict when price will drop into target ± tolerance range.
-
-    Returns ISO date string, or None if trend doesn't lead there.
-    """
-    if monthly_trend_pct >= 0:
-        return None
-
-    target_high = target_price + tolerance
-    if current_price <= target_high:
-        return None
-
-    gap = current_price - target_high
-    monthly_drop = abs(monthly_trend_pct / 100) * current_price
-
-    if monthly_drop <= 0:
-        return None
-
-    months_needed = gap / monthly_drop
-    if months_needed > 36:
-        return None
-
-    target_date = datetime.now() + timedelta(days=months_needed * 30.44)
-    return target_date.strftime("%Y-%m-%d")
-
-
-def _parse_date(val) -> Optional[datetime]:
-    if isinstance(val, datetime):
-        return val
-    if isinstance(val, str):
-        try:
-            return datetime.fromisoformat(val)
-        except (ValueError, TypeError):
-            return None
-    return None
+    stale = delete_stale_comparables()
+    logger.info("Comparables: %d tracked, %d stale removed", count, stale)
+    return count, alerts

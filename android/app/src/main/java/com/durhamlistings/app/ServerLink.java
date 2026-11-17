@@ -76,25 +76,42 @@ final class ServerLink {
     }
 
     private static Reached check(String url, String apiKey, String fingerprint) throws Exception {
-        HttpURLConnection conn = open(url + "/api/key-check", fingerprint);
+        HttpURLConnection conn = get(url + "/api/key-check", apiKey, fingerprint);
         try {
-            conn.setRequestProperty("X-API-Key", apiKey);
-            conn.setConnectTimeout(6000);
             conn.setReadTimeout(6000);
             if (conn.getResponseCode() != 200) throw new Exception("HTTP " + conn.getResponseCode());
 
             List<String> current = new ArrayList<>();
-            try (InputStream in = conn.getInputStream()) {
-                ByteArrayOutputStream body = new ByteArrayOutputStream();
-                byte[] buf = new byte[4096];
-                for (int n; (n = in.read(buf)) > 0; ) body.write(buf, 0, n);
-                JSONArray arr = new JSONObject(body.toString("UTF-8")).optJSONArray("urls");
-                for (int i = 0; arr != null && i < arr.length(); i++) current.add(arr.getString(i));
-            }
+            JSONArray arr = readJson(conn).optJSONArray("urls");
+            for (int i = 0; arr != null && i < arr.length(); i++) current.add(arr.getString(i));
             return new Reached(url, current);
         } finally {
             conn.disconnect();
         }
+    }
+
+    /** A GET to the paired server, authorized with the API key. */
+    static HttpURLConnection get(String url, String apiKey, String fingerprint) throws Exception {
+        HttpURLConnection conn = open(url, fingerprint);
+        conn.setRequestProperty("X-API-Key", apiKey);
+        conn.setConnectTimeout(6000);
+        conn.setReadTimeout(15000);
+        return conn;
+    }
+
+    static JSONObject readJson(HttpURLConnection conn) throws Exception {
+        try (InputStream in = conn.getInputStream()) {
+            ByteArrayOutputStream body = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            for (int n; (n = in.read(buf)) > 0; ) body.write(buf, 0, n);
+            return new JSONObject(body.toString("UTF-8"));
+        }
+    }
+
+    static String hex(byte[] bytes) {
+        StringBuilder hex = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) hex.append(String.format("%02x", b));
+        return hex.toString();
     }
 
     // One factory per pinned certificate: connections, and TLS sessions, are only reused
@@ -134,10 +151,8 @@ final class ServerLink {
         if (certDer == null || fingerprint == null || fingerprint.isEmpty()) return false;
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(certDer);
-            StringBuilder hex = new StringBuilder();
-            for (byte b : digest) hex.append(String.format("%02x", b));
             return MessageDigest.isEqual(
-                    hex.toString().getBytes("US-ASCII"),
+                    hex(digest).getBytes("US-ASCII"),
                     normalize(fingerprint).getBytes("US-ASCII"));
         } catch (Exception e) {
             return false;

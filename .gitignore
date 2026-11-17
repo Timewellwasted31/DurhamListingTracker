@@ -20,6 +20,9 @@ android/build/
 android/app/build/
 android/local.properties
 
+# The phone app build the desktop server offers for updating (copied there by the Android build)
+app/listingtracker/mobile/android/
+
 # Installer output
 installer/*.exe
 installer/*.zip

@@ -23,6 +23,9 @@ from listingtracker.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
+HTTP_PORT = 8000   # home network and pairing
+HTTPS_PORT = 8443  # pinned certificate; the one forwarded through the router
+
 API_KEY_PATH = DATA_DIR / "api_key.txt"
 TLS_DIR = DATA_DIR / "tls"
 CERT_PATH = TLS_DIR / "server.crt"

@@ -31,6 +31,7 @@ from listingtracker.profiles import BuyerProfile
 from listingtracker.ui.commute_tab import CommuteTab
 from listingtracker import db as listing_db
 from listingtracker import images as listing_images
+from listingtracker import pricehistory
 
 logger = logging.getLogger(__name__)
 
@@ -495,7 +496,7 @@ class DetailPane(QWidget):
         chart_header.addWidget(self.fetch_history_btn)
         self.chart_layout.addLayout(chart_header)
 
-        self.chart_widget = QLabel("Price history chart appears after 2+ fetches")
+        self.chart_widget = QLabel("No price history")
         self.chart_widget.setMinimumHeight(180)
         self.chart_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.chart_widget.setStyleSheet(
@@ -503,6 +504,16 @@ class DetailPane(QWidget):
             "color: #666; font-size: 12px;"
         )
         self.chart_layout.addWidget(self.chart_widget)
+
+        self.forecast_label = QLabel()
+        self.forecast_label.setWordWrap(True)
+        self.forecast_label.setTextFormat(Qt.TextFormat.RichText)
+        self.forecast_label.setStyleSheet(
+            "background: #1a1a2e; border: 1px solid #6c63ff; border-radius: 8px; "
+            "padding: 8px 10px; color: #ccc; font-size: 12px; margin-top: 6px;"
+        )
+        self.forecast_label.setVisible(False)
+        self.chart_layout.addWidget(self.forecast_label)
         self._layout.addWidget(self.chart_container)
 
         # Notes
@@ -596,6 +607,7 @@ class DetailPane(QWidget):
             return
 
         snap = self._snapshots[-1] if self._snapshots else None
+        self._prices = pricehistory.summarize(listing.id, self._snapshots)
 
         # Title
         addr = listing.address or "Unknown Address"
@@ -830,7 +842,7 @@ class DetailPane(QWidget):
             ("Locker", self._clean_field(snap.locker) if snap.locker else "—"),
             ("Rent Controlled", snap.rent_controlled or "—"),
             ("Possession Date", snap.possession_date or "—"),
-            ("Days on Market", f"{snap.days_on_market} days" if snap.days_on_market else "—"),
+            ("Days on Market", f"{self._prices.days_on_market} days" if self._prices.days_on_market else "—"),
             ("Year Built", str(snap.year_built) if snap.year_built else "—"),
             ("Building Age", f"{date.today().year - snap.year_built} years" if snap.year_built else "—"),
         ]
@@ -1104,7 +1116,7 @@ class DetailPane(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
 
         cfg = self._finance_cfg
-        dom = snap.days_on_market
+        dom = self._prices.days_on_market
         price = snap.list_price
         sqft = snap.sqft_max or snap.sqft_min or 0
 
@@ -1591,7 +1603,7 @@ class DetailPane(QWidget):
 
     def _build_comparables_tab(self, listing: Listing, snap: Snapshot) -> QWidget:
         from listingtracker.db import (
-            get_comparables_for_favorite, get_latest_snapshot, get_snapshots_for_listing,
+            get_comparables_for_favorite, get_latest_snapshot,
         )
         from listingtracker.comparables import PRICE_TOLERANCE
 
@@ -1652,9 +1664,9 @@ class DetailPane(QWidget):
 
             # Price row
             price_txt = f"${comp_snap.list_price:,.0f}"
-            gap_txt = f"+${gap:,.0f}" if gap > 0 else f"${gap:,.0f}"
+            gap_txt = f"+${gap:,.0f}" if gap >= 0 else f"−${-gap:,.0f}"
             if in_range:
-                gap_txt = "IN RANGE!"
+                gap_txt += "  ·  IN RANGE"
                 gap_color = "#4caf50"
             elif gap <= PRICE_TOLERANCE * 2:
                 gap_color = "#ffd54f"
@@ -1690,12 +1702,12 @@ class DetailPane(QWidget):
                 card_layout.addWidget(spec_l)
 
             # Trend + prediction
-            if trend is not None:
+            if trend:  # a listing that never changed price has no trend to show
                 arrow = "↓" if trend < 0 else "↑"
                 trend_color = "#4caf50" if trend < 0 else "#ef5350"
                 trend_txt = f"{arrow} {abs(trend):.1f}%/month"
                 if predicted:
-                    trend_txt += f"  —  Est. target: {predicted}"
+                    trend_txt += f"  —  in range by ~{predicted}"
                 trend_l = QLabel(trend_txt)
                 trend_l.setStyleSheet(f"color: {trend_color}; font-size: 11px;")
                 card_layout.addWidget(trend_l)
@@ -2143,18 +2155,30 @@ class DetailPane(QWidget):
             return f"{sqft_max:,}"
         return "—"
 
+    def _update_forecast(self):
+        fc = self._prices.forecast
+        self.forecast_label.setVisible(fc is not None)
+        if not fc:
+            return
+        when = "Due now" if fc.overdue else f"Around {fc.expected:%b} {fc.expected.day}, {fc.expected.year}"
+        span = (f"likely by {fc.latest:%b} {fc.latest.day}" if fc.overdue
+                else f"likely {fc.earliest:%b} {fc.earliest.day} – {fc.latest:%b} {fc.latest.day}")
+        self.forecast_label.setText(
+            f'<span style="color:#81d4fa; font-weight:bold;">Next price drop:</span> '
+            f'<b style="color:#b0aaff;">{when}</b> ({span}, {fc.confidence} confidence) '
+            f'to about <b>${fc.price:,.0f}</b> <span style="color:#66bb6a;">(−{fc.pct * 100:.1f}%)</span>'
+            f'<br><span style="color:#999;">{escape(fc.basis)}</span>'
+        )
+
     def _update_chart(self):
-        if not self._snapshots:
+        self._update_forecast()
+        points = self._prices.points
+        if not points:
             self._show_chart_message("No price history")
             return
-
-        prices = [
-            (s.fetched_at, s.list_price)
-            for s in self._snapshots
-            if s.list_price
-        ]
-        if len(prices) < 2:
-            self._show_chart_message("Need 2+ data points for chart")
+        if len(points) < 2:
+            listed = self._prices.list_date or points[0][0].isoformat()
+            self._show_chart_message(f"No price changes since listing ({listed})")
             return
 
         try:
@@ -2162,23 +2186,16 @@ class DetailPane(QWidget):
             matplotlib.use("QtAgg")
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
             from matplotlib.figure import Figure
-            from datetime import datetime
-            import matplotlib.dates
 
             fig = Figure(figsize=(6, 2.5), dpi=100, facecolor="#1e1e1e")
             ax = fig.add_subplot(111)
             ax.set_facecolor("#1e1e1e")
 
-            dates, vals = [], []
-            for fetched_at, price in prices:
-                if isinstance(fetched_at, str):
-                    dates.append(datetime.fromisoformat(fetched_at))
-                else:
-                    dates.append(fetched_at)
-                vals.append(price)
-
-            ax.plot(dates, vals, marker="o", linewidth=2, markersize=5,
-                    color="#42a5f5", markerfacecolor="#90caf9")
+            # Each price holds until the next change; carry the current one to today
+            dates = [d for d, _ in points] + [max(date.today(), points[-1][0])]
+            vals = [p for _, p in points] + [points[-1][1]]
+            ax.step(dates, vals, where="post", linewidth=2, color="#42a5f5")
+            ax.plot(dates[:-1], vals[:-1], "o", markersize=5, color="#90caf9")
             ax.set_ylabel("Price ($)", color="#888")
             ax.tick_params(colors="#888")
             for spine in ax.spines.values():
@@ -2186,26 +2203,27 @@ class DetailPane(QWidget):
             fig.autofmt_xdate()
             fig.tight_layout()
 
-            canvas = FigureCanvasQTAgg(fig)
-            old = self.chart_widget
-            self.chart_layout.removeWidget(old)
-            old.deleteLater()
-            self.chart_widget = canvas
-            self.chart_layout.addWidget(canvas)
+            self._swap_chart_widget(FigureCanvasQTAgg(fig))
 
         except ImportError:
             self._show_chart_message("Install matplotlib for charts")
 
+    def _swap_chart_widget(self, new: QWidget):
+        """Put `new` where the chart goes, in the same spot in the layout."""
+        old = self.chart_widget
+        index = self.chart_layout.indexOf(old)
+        self.chart_layout.removeWidget(old)
+        old.deleteLater()
+        self.chart_widget = new
+        self.chart_layout.insertWidget(index, new)
+
     def _show_chart_message(self, text: str, color: str = "#666"):
         """Show a text placeholder where the chart goes, replacing a drawn chart if there is one."""
         if not isinstance(self.chart_widget, QLabel):
-            old = self.chart_widget
-            self.chart_layout.removeWidget(old)
-            old.deleteLater()
-            self.chart_widget = QLabel()
-            self.chart_widget.setMinimumHeight(180)
-            self.chart_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.chart_layout.addWidget(self.chart_widget)
+            label = QLabel()
+            label.setMinimumHeight(180)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._swap_chart_widget(label)
         self.chart_widget.setText(text)
         self.chart_widget.setStyleSheet(
             "background: #1e1e1e; border: 1px solid #333; border-radius: 8px; "

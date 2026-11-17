@@ -10,8 +10,8 @@ android {
         applicationId "com.durhamlistings.app"
         minSdk 24
         targetSdk 34
-        versionCode 3
-        versionName "2.8.1"
+        versionCode 4
+        versionName "2.9.0"
     }
 
     buildTypes {
@@ -24,9 +24,35 @@ android {
         }
     }
 
+    buildFeatures {
+        buildConfig true  // the updater compares BuildConfig.VERSION_CODE with the server's build
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+// The desktop server offers the phone its newest build: after each debug build, copy the APK and
+// its version (from defaultConfig above, the single source of it) to where the server reads them.
+def serverAppDir = rootProject.file('../app/listingtracker/mobile/android')
+android.applicationVariants.configureEach { variant ->
+    if (variant.buildType.name != 'debug') return
+    variant.assembleProvider.configure {
+        doLast {
+            def apk = variant.outputs.first().outputFile
+            serverAppDir.mkdirs()
+            copy {
+                from apk
+                into serverAppDir
+                rename { 'DurhamListings.apk' }
+            }
+            new File(serverAppDir, 'version.json').text = groovy.json.JsonOutput.toJson([
+                version_code: variant.versionCode,
+                version_name: variant.versionName,
+            ])
+        }
     }
 }
 

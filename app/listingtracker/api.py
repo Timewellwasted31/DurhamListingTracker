@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
+import hashlib
 import hmac
+import json
 import logging
 import os
 import sys
@@ -27,7 +30,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 
 from listingtracker.paths import ensure_directories, use_installed_browsers, LOGS_DIR, MPL_CACHE_DIR
-from listingtracker.remote import api_key
+from listingtracker.remote import HTTP_PORT, HTTPS_PORT, api_key
 
 use_installed_browsers()
 os.environ["MPLCONFIGDIR"] = str(MPL_CACHE_DIR)
@@ -35,6 +38,10 @@ os.environ["MPLCONFIGDIR"] = str(MPL_CACHE_DIR)
 logger = logging.getLogger(__name__)
 
 MOBILE_DIR = Path(__file__).parent / "mobile"
+# The Android build puts its newest APK and version here (see android/app/build.gradle)
+APK_PATH = MOBILE_DIR / "android" / "DurhamListings.apk"
+APK_VERSION_PATH = MOBILE_DIR / "android" / "version.json"
+APK_MEDIA_TYPE = "application/vnd.android.package-archive"
 KEEP_ALIVE_SECONDS = 60  # uvicorn's 5 s default forces a fresh TLS handshake after a short pause
 
 app = FastAPI(title="Durham Listing Tracker", version="1.0.0")
@@ -47,7 +54,7 @@ app.add_middleware(
     allow_headers=["X-API-Key"],
 )
 
-_http_port: int = 8000
+_http_port: int = HTTP_PORT
 _remote = None  # listingtracker.remote.RemoteAccess once main() has started HTTPS
 
 
@@ -136,13 +143,15 @@ def _summary(lst, snap, image_url) -> dict:
 @app.get("/api/listings/{listing_id}")
 def get_listing(listing_id: int, _=Depends(verify_api_key)):
     from listingtracker.db import get_listing_by_id, get_snapshots_for_listing, get_listing_images, get_peer_stats
+    from listingtracker.pricehistory import summarize
 
     lst = get_listing_by_id(listing_id)
     if not lst:
         raise HTTPException(status_code=404, detail="Listing not found")
 
-    history = get_snapshots_for_listing(listing_id)  # oldest first
-    snap = history[-1] if history else None
+    snapshots = get_snapshots_for_listing(listing_id)  # oldest first
+    snap = snapshots[-1] if snapshots else None
+    prices = summarize(listing_id, snapshots)
 
     peers = {}
     if snap and snap.list_price and snap.beds:
@@ -152,7 +161,10 @@ def get_listing(listing_id: int, _=Depends(verify_api_key)):
     return _compact({
         **asdict(lst),
         "snapshot": _snap_dict(snap) if snap else None,
-        "history": [{"fetched_at": s.fetched_at, "list_price": s.list_price} for s in history if s.list_price],
+        "list_date": prices.list_date,
+        "days_on_market": prices.days_on_market,
+        "price_history": [[d.isoformat(), p] for d, p in prices.points],
+        "next_drop": prices.forecast.to_dict() if prices.forecast else None,
         "images": [img["url"] for img in get_listing_images(listing_id)],
         "peer_stats": peers,
     })
@@ -217,57 +229,52 @@ def get_comparables(listing_id: int, _=Depends(verify_api_key)):
 @app.post("/api/scan-comparables")
 def scan_comparables(_=Depends(verify_api_key)):
     """Trigger a comparable property scan for all favorites."""
-    from listingtracker.db import (
-        get_favorited_listings, get_all_listings, get_all_latest_snapshots,
-        get_latest_snapshot, get_snapshots_for_listing, upsert_comparable,
-        delete_stale_comparables,
-    )
-    from listingtracker.comparables import (
-        find_comparables_for_favorite, analyze_price_trend, predict_target_date,
-        PRICE_TOLERANCE,
-    )
+    from listingtracker.db import get_favorited_listings
+    from listingtracker.comparables import scan_comparables as scan
 
     favorites = get_favorited_listings()
     if not favorites:
         return {"message": "No favorites to scan", "count": 0}
+    total, _ = scan(favorites)
+    return {"message": f"Found {total} comparables across {len(favorites)} favorites", "count": total}
 
-    all_listings = get_all_listings(active_only=True)
-    all_snapshots = get_all_latest_snapshots()
 
-    total = 0
-    for fav in favorites:
-        fav_snap = all_snapshots.get(fav.id) or get_latest_snapshot(fav.id)
-        if not fav_snap or not fav_snap.list_price:
-            continue
+# ---------------------------------------------------------------------------
+# Phone app updates
+# ---------------------------------------------------------------------------
 
-        matches = find_comparables_for_favorite(fav, fav_snap, all_listings, all_snapshots)
-        for listing_id, score in matches:
-            comp_snap = all_snapshots.get(listing_id)
-            if not comp_snap:
-                continue
+@functools.lru_cache(maxsize=1)
+def _apk_info(modified_ns: int, size: int) -> dict:
+    """Version, size and SHA-256 of the APK on disk; hashed again only when the file changes."""
+    info = json.loads(APK_VERSION_PATH.read_text(encoding="utf-8"))
+    digest = hashlib.sha256()
+    with open(APK_PATH, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return {"version_code": int(info["version_code"]), "version_name": info["version_name"],
+            "size": size, "sha256": digest.hexdigest()}
 
-            trend = analyze_price_trend(get_snapshots_for_listing(listing_id))
-            predicted = None
-            notes = ""
 
-            if trend is not None and trend < 0:
-                predicted = predict_target_date(
-                    comp_snap.list_price, fav_snap.list_price, trend, PRICE_TOLERANCE,
-                )
-                if predicted:
-                    notes = f"Dropping ~{abs(trend):.1f}%/mo, may reach target by {predicted}"
+def _android_release() -> dict:
+    try:
+        st = APK_PATH.stat()
+        return _apk_info(st.st_mtime_ns, st.st_size)
+    except (OSError, ValueError, KeyError):
+        raise HTTPException(status_code=404, detail="No phone app update on this computer") from None
 
-            gap = comp_snap.list_price - fav_snap.list_price
-            if gap <= PRICE_TOLERANCE:
-                notes = f"IN RANGE! Gap: ${gap:,.0f}"
 
-            upsert_comparable(fav.id, listing_id, score,
-                              predicted_target_date=predicted,
-                              price_trend_pct_per_month=trend, notes=notes)
-            total += 1
+@app.get("/api/app/android")
+def android_release(_=Depends(verify_api_key)):
+    """The phone app build this computer can install, for the app to compare with its own."""
+    return _android_release()
 
-    stale = delete_stale_comparables()
-    return {"message": f"Found {total} comparables across {len(favorites)} favorites", "count": total, "stale_removed": stale}
+
+@app.get("/api/app/android/apk")
+def android_apk(_=Depends(verify_api_key)):
+    _android_release()  # 404 unless a complete release is here
+    # An APK is already compressed; "identity" also keeps the gzip middleware off it
+    return FileResponse(APK_PATH, media_type=APK_MEDIA_TYPE, filename="DurhamListings.apk",
+                        headers={"Content-Encoding": "identity", "Cache-Control": "no-store"})
 
 
 @app.get("/api/key-check")
@@ -306,14 +313,91 @@ def setup_logging() -> None:
     )
 
 
-def main() -> None:
-    import uvicorn
+class PhoneServer:
+    """The phone app's server: plain HTTP for the home network and pairing, and HTTPS with the
+    pinned certificate for everywhere else, offered through the router when UPnP allows.
+    The desktop app runs one on a background thread; `--api` runs one on its own."""
 
+    def __init__(self, host: str = "0.0.0.0", port: int = HTTP_PORT, https_port: int = HTTPS_PORT,
+                 use_upnp: bool = True, access_log: bool = True):
+        import uvicorn
+        from listingtracker.remote import CERT_PATH, KEY_PATH, RemoteAccess, ensure_certificate
+
+        global _http_port, _remote
+        _http_port = port
+        _remote = self.remote = RemoteAccess(https_port, ensure_certificate(), use_upnp=use_upnp)
+        # proxy_headers off: the loopback check in pair_info must see the real peer address.
+        # log_config None: uvicorn logs through the app's own logging, and never touches a
+        # console the packaged app doesn't have.
+        common = dict(host=host, log_config=None, access_log=access_log, proxy_headers=False,
+                      timeout_keep_alive=KEEP_ALIVE_SECONDS, timeout_graceful_shutdown=3)
+        self._servers = [
+            uvicorn.Server(uvicorn.Config(app, port=port, **common)),
+            uvicorn.Server(uvicorn.Config(app, port=https_port, **common,
+                                          ssl_certfile=str(CERT_PATH), ssl_keyfile=str(KEY_PATH))),
+        ]
+        self._thread = None
+        logger.info("Phone server on %s:%d (HTTPS on %d)", host, port, https_port)
+
+    def _bind(self) -> list:
+        """Both listening sockets, or OSError with neither held. Binding here, rather than letting
+        uvicorn do it, means a taken port can't leave the other one bound by a dead server."""
+        import socket
+        sockets = []
+        try:
+            for server in self._servers:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sockets.append(sock)
+                sock.bind((server.config.host, server.config.port))
+        except OSError:
+            for sock in sockets:
+                sock.close()
+            raise
+        return sockets
+
+    def run(self) -> None:
+        """Serve until stopped; the router's port forward is removed on the way out."""
+        sockets = self._bind()
+
+        async def serve() -> None:
+            await asyncio.gather(*(server.serve(sockets=[sock])
+                                   for server, sock in zip(self._servers, sockets)))
+
+        self.remote.start()
+        try:
+            asyncio.run(serve())
+        finally:
+            self.remote.stop()
+            for sock in sockets:
+                sock.close()
+
+    def start(self) -> None:
+        import threading
+        self._thread = threading.Thread(target=self._run_logged, name="phone-server", daemon=True)
+        self._thread.start()
+
+    def _run_logged(self) -> None:
+        try:
+            self.run()
+        except OSError as e:
+            logger.warning("Phone server not started: a port it needs is in use, "
+                           "probably by another copy that is already serving phones (%s)", e)
+        except BaseException:  # never let the server take the desktop app down with it
+            logger.exception("Phone server stopped")
+
+    def stop(self, timeout: float = 5) -> None:
+        for server in self._servers:
+            server.should_exit = True
+        if self._thread:
+            self._thread.join(timeout)
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="Durham Listing Tracker API server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8000, help="Port (default 8000)")
-    parser.add_argument("--https-port", type=int, default=8443,
-                        help="Encrypted port for paired devices (default 8443)")
+    parser.add_argument("--port", type=int, default=HTTP_PORT, help=f"Port (default {HTTP_PORT})")
+    parser.add_argument("--https-port", type=int, default=HTTPS_PORT,
+                        help=f"Encrypted port for paired devices (default {HTTPS_PORT})")
     parser.add_argument("--no-upnp", action="store_true",
                         help="Do not ask the router to forward the HTTPS port")
     args = parser.parse_args()
@@ -322,34 +406,10 @@ def main() -> None:
     setup_logging()
 
     from listingtracker.db import init_db
+    from listingtracker.pricehistory import backfill_in_background
     init_db()
-
-    from listingtracker.remote import CERT_PATH, KEY_PATH, RemoteAccess, ensure_certificate
-
-    global _http_port, _remote
-    _http_port = args.port
-    _remote = RemoteAccess(args.https_port, ensure_certificate(), use_upnp=not args.no_upnp)
-    logger.info("API server starting on %s:%d (HTTPS on %d)", args.host, args.port, args.https_port)
-    logger.info("API key: %s", api_key())
-    logger.info("Mobile app: http://localhost:%d", args.port)
-
-    # proxy_headers off: the loopback check in pair_info must see the real peer address
-    common = dict(host=args.host, log_level="info", proxy_headers=False,
-                  timeout_keep_alive=KEEP_ALIVE_SECONDS)
-    servers = [
-        uvicorn.Server(uvicorn.Config(app, port=args.port, **common)),
-        uvicorn.Server(uvicorn.Config(app, port=args.https_port, **common,
-                                      ssl_certfile=str(CERT_PATH), ssl_keyfile=str(KEY_PATH))),
-    ]
-
-    async def serve() -> None:
-        await asyncio.gather(*(s.serve() for s in servers))
-
-    _remote.start()
-    try:
-        asyncio.run(serve())
-    finally:
-        _remote.stop()
+    backfill_in_background()
+    PhoneServer(args.host, args.port, args.https_port, use_upnp=not args.no_upnp).run()
 
 
 if __name__ == "__main__":

@@ -24,5 +24,20 @@
     <string name="server_unreachable">Make sure your computer is on and Durham Listing Tracker is running, then try again.</string>
     <string name="still_unreachable">Still can\'t reach it.</string>
     <string name="try_again">Try again</string>
+    <string name="update_title">Update available</string>
+    <string name="update_message">Version %1$s is on your computer (you have %2$s). Download it (%3$s MB) and install?</string>
+    <string name="update_now">Update</string>
+    <string name="update_later">Later</string>
+    <string name="update_downloading">Downloading update&#8230;</string>
+    <string name="update_allow_title">Allow app updates</string>
+    <string name="update_allow_message">Android needs your permission for Durham Listings to install its own updates. Turn on \"Allow from this source\", then come back to this screen.</string>
+    <string name="update_open_settings">Open settings</string>
+    <string name="update_latest">You have the latest version (%1$s).</string>
+    <string name="update_none">Your computer has no app update to offer.</string>
+    <string name="update_check_failed">Couldn\'t check for an update. Try again in a moment.</string>
+    <string name="update_download_failed">Couldn\'t download the update. Try again in a moment.</string>
+    <string name="update_damaged">The update didn\'t download correctly. Try again.</string>
+    <string name="update_signature">The update wasn\'t installed: it was built with a different signing key than this app. Install it from the release page instead.</string>
+    <string name="update_failed">The update wasn\'t installed (%1$s).</string>
     <string name="fingerprint_needed">This address is incomplete. Copy the full server address from the desktop app: it ends with # followed by a long code.</string>
 </resources>

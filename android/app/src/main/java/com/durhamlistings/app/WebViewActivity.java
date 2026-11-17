@@ -24,6 +24,7 @@ public class WebViewActivity extends AppCompatActivity {
     private String serverUrl;
     private String apiKey;
     private String certFp;
+    private AppUpdater updater;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -49,6 +50,15 @@ public class WebViewActivity extends AppCompatActivity {
 
         // The key rides in the fragment, which the page reads but the browser never sends
         webView.loadUrl(serverUrl + "/#key=" + Uri.encode(apiKey));
+
+        updater = new AppUpdater(this, serverUrl, apiKey, certFp);
+        updater.check(false);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (updater != null) updater.onResume();
     }
 
     private void setupWebView() {
@@ -110,6 +120,13 @@ public class WebViewActivity extends AppCompatActivity {
         }
 
         @JavascriptInterface
+        public void checkForUpdate() {
+            runOnUiThread(() -> {
+                if (fromServerPage()) updater.check(true);
+            });
+        }
+
+        @JavascriptInterface
         public void disconnect() {
             runOnUiThread(() -> {
                 if (!fromServerPage()) return;
@@ -146,6 +163,7 @@ public class WebViewActivity extends AppCompatActivity {
 
     @Override
     protected void onDestroy() {
+        if (updater != null) updater.close();
         if (webView != null) {
             webView.destroy();
         }

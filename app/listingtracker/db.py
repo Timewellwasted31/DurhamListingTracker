@@ -96,7 +96,26 @@ CREATE TABLE IF NOT EXISTS comparables (
 );
 
 CREATE INDEX IF NOT EXISTS idx_comparables_favorite ON comparables(favorite_id);
+
+-- The listing site's own record: kind 'listed' holds the date the current listing started,
+-- kind 'price' each asking price and the date it took effect. Snapshots only show what we saw.
+CREATE TABLE IF NOT EXISTS price_events (
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    kind TEXT NOT NULL,
+    event_date TEXT NOT NULL,
+    price REAL,
+    PRIMARY KEY (listing_id, kind, event_date)
+) WITHOUT ROWID;
 """
+
+# Every table whose rows belong to one listing, as (table, column), children before `listings`
+_LISTING_CHILDREN = (
+    ("snapshots", "listing_id"),
+    ("listing_images", "listing_id"),
+    ("price_events", "listing_id"),
+    ("comparables", "listing_id"),
+    ("comparables", "favorite_id"),
+)
 
 SEED_URLS = [
     "https://strata.ca/pickering/1210-radom-st-the-bayshore-condominiums",
@@ -518,11 +537,19 @@ def get_peer_stats(
         }
 
 
+def _delete_listings(conn: sqlite3.Connection, ids: list[int]) -> None:
+    """Delete listings and every row that belongs to them (the caller commits)."""
+    if not ids:
+        return
+    ph = ",".join("?" * len(ids))
+    for table, column in _LISTING_CHILDREN:
+        conn.execute(f"DELETE FROM {table} WHERE {column} IN ({ph})", ids)
+    conn.execute(f"DELETE FROM listings WHERE id IN ({ph})", ids)
+
+
 def delete_listing(listing_id: int) -> None:
     with _connect() as conn:
-        conn.execute("DELETE FROM listing_images WHERE listing_id = ?", (listing_id,))
-        conn.execute("DELETE FROM snapshots WHERE listing_id = ?", (listing_id,))
-        conn.execute("DELETE FROM listings WHERE id = ?", (listing_id,))
+        _delete_listings(conn, [listing_id])
         conn.commit()
 
 
@@ -535,10 +562,8 @@ def cleanup_empty_listings() -> int:
             "WHERE l.address = '' AND s.id IS NULL"
         ).fetchall()
         ids = [r["id"] for r in rows]
-        if ids:
-            placeholders = ",".join("?" * len(ids))
-            conn.execute(f"DELETE FROM listings WHERE id IN ({placeholders})", ids)
-            conn.commit()
+        _delete_listings(conn, ids)
+        conn.commit()
         return len(ids)
 
 
@@ -596,17 +621,7 @@ def cleanup_bad_listings(after_fetch: bool = False) -> int:
                 seen_urls[norm] = r["id"]
 
         ids = list(ids_to_delete)
-        if ids:
-            placeholders = ",".join("?" * len(ids))
-            conn.execute(
-                f"DELETE FROM snapshots WHERE listing_id IN ({placeholders})", ids
-            )
-            conn.execute(
-                f"DELETE FROM listing_images WHERE listing_id IN ({placeholders})", ids
-            )
-            conn.execute(
-                f"DELETE FROM listings WHERE id IN ({placeholders})", ids
-            )
+        _delete_listings(conn, ids)
         # Normalize URLs on remaining listings
         remaining = conn.execute("SELECT id, url FROM listings").fetchall()
         for r in remaining:
@@ -640,12 +655,8 @@ def cleanup_non_purchasable() -> int:
             ")"
         ).fetchall()
         ids = [r["id"] for r in rows]
-        if ids:
-            ph = ",".join("?" * len(ids))
-            conn.execute(f"DELETE FROM snapshots WHERE listing_id IN ({ph})", ids)
-            conn.execute(f"DELETE FROM listing_images WHERE listing_id IN ({ph})", ids)
-            conn.execute(f"DELETE FROM listings WHERE id IN ({ph})", ids)
-            conn.commit()
+        _delete_listings(conn, ids)
+        conn.commit()
         return len(ids)
 
 
@@ -783,6 +794,57 @@ def get_first_image_urls() -> dict[int, str]:
             "SELECT listing_id, url, MIN(position) FROM listing_images GROUP BY listing_id"
         ).fetchall()
         return {r["listing_id"]: r["url"] for r in rows}
+
+
+PriceHistory = tuple[Optional[str], list[tuple[str, float]]]  # (list date, [(date, price)] oldest first)
+
+
+def save_price_history(listing_id: int, list_date: Optional[str], points: list[tuple[str, float]]) -> None:
+    """Replace a listing's site-reported history; the site's latest record is the authority.
+    A page that reported nothing leaves the stored history alone."""
+    if not list_date and not points:
+        return
+    rows = [(listing_id, "price", d, p) for d, p in points]
+    if list_date:
+        rows.append((listing_id, "listed", list_date, None))
+    with _connect() as conn:
+        conn.execute("DELETE FROM price_events WHERE listing_id = ?", (listing_id,))
+        conn.executemany(
+            "INSERT OR REPLACE INTO price_events (listing_id, kind, event_date, price) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+
+
+def get_price_histories(listing_id: Optional[int] = None) -> dict[int, PriceHistory]:
+    """{listing_id: (list date, [(date, price)])} for one listing, or for all when none is given."""
+    where, args = ("WHERE listing_id = ?", (listing_id,)) if listing_id is not None else ("", ())
+    out: dict[int, PriceHistory] = {}
+    with _connect() as conn:
+        for r in conn.execute(
+            f"SELECT listing_id, kind, event_date, price FROM price_events {where} "
+            "ORDER BY listing_id, event_date", args,
+        ):
+            list_date, points = out.setdefault(r["listing_id"], (None, []))
+            if r["kind"] == "listed":
+                out[r["listing_id"]] = (r["event_date"], points)
+            else:
+                points.append((r["event_date"], r["price"]))
+    return out
+
+
+def get_snapshot_ids() -> list[tuple[int, int, str]]:
+    """(snapshot id, listing id, listing url) for every snapshot, oldest first."""
+    with _connect() as conn:
+        return [tuple(r) for r in conn.execute(
+            "SELECT s.id, s.listing_id, l.url FROM snapshots s "
+            "JOIN listings l ON l.id = s.listing_id ORDER BY s.id"
+        )]
+
+
+def has_price_history() -> bool:
+    with _connect() as conn:
+        return conn.execute("SELECT 1 FROM price_events LIMIT 1").fetchone() is not None
 
 
 def update_image_local_path(image_id: int, local_path: str) -> None:

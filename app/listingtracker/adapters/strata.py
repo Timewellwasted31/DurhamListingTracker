@@ -83,6 +83,8 @@ class StrataAdapter(SiteAdapter):
                 result["outdoor_space"] = listing["outdoorSpace"]
             if listing.get("rentControlled") is not None:
                 result["rent_controlled"] = "Yes" if listing["rentControlled"] else "No"
+            if listing.get("mlsNumber"):
+                result["list_date"], result["price_history"] = self._price_history(rsc, listing["mlsNumber"])
         else:
             logger.debug("RSC listing data not found; falling back to meta tags")
             result["list_price"] = self._price_from_dom(html)
@@ -351,6 +353,28 @@ class StrataAdapter(SiteAdapter):
         if active:
             return max(active, key=_richness)
         return max(listings, key=_richness)
+
+    @staticmethod
+    def _price_history(rsc: str, mls: str) -> tuple[Optional[str], list[tuple[str, float]]]:
+        """The site's record of this listing's asking prices, as (list date, [(date, price)] oldest
+        first). The page carries several listing objects (this unit's past listings, other units),
+        so the price list is matched to ours by the first MLS number after it (its own object's)."""
+        mls_field = re.compile(r'"mlsNumber"\s*:\s*"([^"]+)"')
+        for m in re.finditer(r'"listPrices"\s*:\s*(\[[^\]]*\])', rsc):
+            owner = mls_field.search(rsc, m.end(), m.end() + 600)
+            if not owner or owner.group(1) != mls:
+                continue
+            try:
+                entries = json.loads(m.group(1))
+            except ValueError:
+                continue
+            points = sorted(
+                (e["priceDate"][:10], float(e["price"]))
+                for e in entries if e.get("price") and e.get("priceDate")
+            )
+            if points:
+                return points[0][0], points
+        return None, []
 
     @staticmethod
     def _map_status(state: str) -> str:

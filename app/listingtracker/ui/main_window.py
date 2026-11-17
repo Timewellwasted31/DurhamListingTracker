@@ -2119,48 +2119,14 @@ class MainWindow(QMainWindow):
             self._scan_comparables_for(listing_id)
 
     def _scan_comparables_for(self, listing_id: int):
-        """Run comparable scan in background when a listing is favorited."""
-        from listingtracker.db import (
-            get_listing_by_id, get_latest_snapshot, get_all_listings,
-            get_all_latest_snapshots, get_snapshots_for_listing,
-            upsert_comparable, delete_stale_comparables,
-        )
-        from listingtracker.comparables import (
-            find_comparables_for_favorite, analyze_price_trend,
-            predict_target_date, PRICE_TOLERANCE,
-        )
+        """Find comparables for a listing that was just favorited."""
+        from listingtracker.db import get_listing_by_id
+        from listingtracker.comparables import scan_comparables
 
         listing = get_listing_by_id(listing_id)
-        fav_snap = get_latest_snapshot(listing_id)
-        if not listing or not fav_snap or not fav_snap.list_price:
+        if not listing:
             return
-
-        all_listings = get_all_listings(active_only=True)
-        all_snapshots = get_all_latest_snapshots()
-
-        matches = find_comparables_for_favorite(listing, fav_snap, all_listings, all_snapshots)
-        count = 0
-        for lid, score in matches:
-            comp_snap = all_snapshots.get(lid)
-            if not comp_snap:
-                continue
-            history = get_snapshots_for_listing(lid)
-            trend = analyze_price_trend(history)
-            predicted = None
-            notes = ""
-            if trend is not None and trend < 0:
-                predicted = predict_target_date(
-                    comp_snap.list_price, fav_snap.list_price, trend, PRICE_TOLERANCE,
-                )
-                if predicted:
-                    notes = f"Dropping ~{abs(trend):.1f}%/mo, may reach target by {predicted}"
-            gap = comp_snap.list_price - fav_snap.list_price
-            if gap <= PRICE_TOLERANCE:
-                notes = f"IN RANGE! Gap: ${gap:,.0f}"
-            upsert_comparable(listing_id, lid, score,
-                              predicted_target_date=predicted,
-                              price_trend_pct_per_month=trend, notes=notes)
-            count += 1
+        count, _ = scan_comparables([listing])
         if count:
             self.statusBar().showMessage(f"Found {count} comparable properties", 5000)
 
