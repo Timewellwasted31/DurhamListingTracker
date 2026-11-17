@@ -237,6 +237,15 @@ class PriceSummary:
     points: list[Point]
     days_on_market: Optional[int]
     forecast: Optional[DropForecast]
+    past_sales: list[tuple[str, float]]
+    bought: Optional[tuple[str, float]]  # what the current owner likely paid
+
+
+def last_purchase(sales: list[tuple[str, float]], list_date: Optional[str]) -> Optional[tuple[str, float]]:
+    """The sale that most likely made the seller the owner: the latest one before this listing
+    began. A sale on or after the list date is this listing's own, not the seller's purchase."""
+    before = [s for s in sales if not list_date or s[0] < list_date]
+    return before[-1] if before else None
 
 
 def market_pattern() -> MarketPattern:
@@ -247,50 +256,13 @@ def market_pattern() -> MarketPattern:
 
 
 def summarize(listing_id: int, snapshots: list[Snapshot], market: Optional[MarketPattern] = None) -> PriceSummary:
-    """Price history, days on market and next-cut forecast for one listing."""
-    from listingtracker.db import get_price_histories
+    """Price history, days on market, next-cut forecast and earlier sales for one listing."""
+    from listingtracker.db import get_past_sales, get_price_histories
 
     list_date, site_points = get_price_histories(listing_id).get(listing_id, (None, []))
     points = timeline(site_points, snapshots)
     snap = snapshots[-1] if snapshots else None
     fc = forecast(points, snap.status, market or market_pattern()) if snap else None
-    return PriceSummary(list_date, points, days_on_market(list_date, snap), fc)
-
-
-def backfill_from_cache() -> int:
-    """Fill site price history from listing pages already saved on disk. It runs only while no
-    history is stored at all, i.e. once, for a database from before history was recorded."""
-    import gzip
-    from listingtracker import db
-    from listingtracker.fetcher import get_adapter_for_url
-    from listingtracker.paths import HTML_CACHE_DIR
-
-    if db.has_price_history():
-        return 0
-    pages = {p.name.split(".")[0]: p for p in HTML_CACHE_DIR.glob("*/*.html.gz")}
-    newest = {}  # listing id -> (url, newest saved page)
-    for snap_id, listing_id, url in db.get_snapshot_ids():
-        if str(snap_id) in pages:
-            newest[listing_id] = (url, pages[str(snap_id)])
-
-    filled = 0
-    for listing_id, (url, path) in newest.items():
-        adapter = get_adapter_for_url(url)
-        if not adapter:
-            continue
-        try:
-            with gzip.open(path, "rt", encoding="utf-8") as f:
-                parsed = adapter.parse(f.read(), url=url)
-        except Exception as e:  # one unreadable page shouldn't stop the rest
-            logger.debug("Backfill skipped %s: %s", path, e)
-            continue
-        if parsed.get("list_date") or parsed.get("price_history"):
-            db.save_price_history(listing_id, parsed.get("list_date"), parsed.get("price_history") or [])
-            filled += 1
-    logger.info("Price history backfilled for %d listings from saved pages", filled)
-    return filled
-
-
-def backfill_in_background() -> None:
-    import threading
-    threading.Thread(target=backfill_from_cache, name="price-history-backfill", daemon=True).start()
+    sales = get_past_sales(listing_id).get(listing_id, [])
+    return PriceSummary(list_date, points, days_on_market(list_date, snap), fc,
+                        sales, last_purchase(sales, list_date))

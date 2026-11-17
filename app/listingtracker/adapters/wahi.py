@@ -77,6 +77,10 @@ class WahiAdapter(SiteAdapter):
             result["days_on_market"] = self._safe_int(str(listing.get("daysOnMarket", "")))
             result["broker"] = listing.get("brokerageName")
             result["list_date"], result["price_history"] = self._price_history(listing)
+            result["past_sales"] = self._past_sales(listing)
+            result["property_type"] = details.get("propertyType") or listing.get("propertyType")
+            page = nd.get("props", {}).get("pageProps", {})
+            result["area_sales"] = self._area_sales([listing, *(page.get("soldComparables") or [])])
             status_raw = listing.get("status", "")
             if status_raw == "A":
                 result["status"] = Status.FOR_SALE.value
@@ -152,6 +156,46 @@ class WahiAdapter(SiteAdapter):
             points.append((list_date, float(listing["listPrice"])))
         points += [(u["date"][:10], float(u["newPrice"])) for u in updates]
         return list_date, points
+
+    @staticmethod
+    def _past_sales(listing: dict) -> list[tuple[str, float]]:
+        """Earlier sales of this property as [(date, price)] oldest first, from its past listings.
+        Leases are left out, and so is the current listing."""
+        from listingtracker.purchaseprice import MIN_SALE_PRICE
+        sales = {
+            ((e.get("soldDate") or "")[:10], float(e["soldPrice"]))
+            for e in listing.get("historicalData") or []
+            if e.get("statusType") == "Sold" and e.get("type") == "Sale" and e.get("soldPrice")
+            and float(e["soldPrice"]) >= MIN_SALE_PRICE
+            and e.get("soldDate") and e.get("mlsId") != listing.get("mlsId")
+        }
+        return sorted(sales)
+
+    @staticmethod
+    def _area_sales(properties: list[dict]) -> list[dict]:
+        """Every sale on record for these properties (the listing and the sold comparables the page
+        shows), each with the property's location, type, bedrooms and size."""
+        from listingtracker.purchaseprice import parse_sqft
+        sales = []
+        for prop in properties:
+            addr = prop.get("address") or {}
+            details = prop.get("details") or {}
+            street = " ".join(p for p in (addr.get("streetNumber"), addr.get("streetName"),
+                                          addr.get("streetSuffix"), addr.get("streetDirection")) if p)
+            for entry in [*(prop.get("historicalData") or []), prop]:
+                if not (entry.get("soldPrice") and entry.get("soldDate")) or entry.get("type") not in (None, "Sale"):
+                    continue
+                sales.append({
+                    "sale_key": f"wahi:{entry.get('mlsId') or prop.get('mlsId')}:{entry['soldDate'][:10]}",
+                    "sold_date": entry["soldDate"][:10],
+                    "sold_price": float(entry["soldPrice"]),
+                    "city": addr.get("city"),
+                    "address": street or None,
+                    "type": details.get("propertyType") or prop.get("propertyType"),
+                    "beds": int(details["numBedrooms"]) if str(details.get("numBedrooms") or "").isdigit() else None,
+                    "sqft": parse_sqft(details.get("sqft") or prop.get("sqft")),
+                })
+        return sales
 
     def _extract_next_data(self, html: str) -> Optional[dict]:
         m = re.search(r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)

@@ -69,10 +69,10 @@ def main() -> None:
     logger.info("Starting Durham Listing Tracker")
 
     from listingtracker.db import init_db
-    from listingtracker.pricehistory import backfill_in_background
+    from listingtracker.savedpages import refresh_in_background
 
     init_db()
-    backfill_in_background()
+    refresh_in_background()
 
     from listingtracker.ui.main_window import MainWindow
 

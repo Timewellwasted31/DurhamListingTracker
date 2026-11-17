@@ -210,6 +210,9 @@ body {
   margin-top: 8px;
 }
 .card-price.sold { color: var(--red); }
+/* What the seller likely paid, in smaller text beside the asking price */
+.bought { font-size: 12px; font-weight: 500; color: var(--text2); margin-left: 8px; white-space: nowrap; }
+.bought-detail { font-size: 13px; color: var(--text2); margin-top: 4px; }
 .card-badges { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 .badge {
   padding: 3px 8px;
@@ -806,7 +809,7 @@ function renderListings() {
             <button class="card-fav ${l.favorited ? 'active' : ''}" id="fav-${l.id}" onclick="event.stopPropagation(); toggleFav(${l.id})">${l.favorited ? '&#9733;' : '&#9734;'}</button>
           </div>
           <div class="card-meta">${meta || escHtml(l.city || l.site)}</div>
-          <div class="card-price ${st.sold ? 'sold' : ''}">${l.price ? formatPrice(l.price) : 'No price'}</div>
+          <div class="card-price ${st.sold ? 'sold' : ''}">${l.price ? formatPrice(l.price) : 'No price'}${boughtTag(l.bought, l.bought_est)}</div>
           <div class="card-badges">
             <span class="badge ${st.cls}">${st.label}</span>
             ${l.city ? `<span class="badge">${escHtml(l.city)}</span>` : ''}
@@ -972,7 +975,7 @@ function renderDetail() {
       </div>`;
   }
 
-  const historyHtml = renderPriceHistory(d.price_history || []);
+  const historyHtml = renderPriceHistory(d.price_history || []) + renderPastSales(d.past_sales || []);
   const forecastHtml = renderForecast(d.next_drop);
 
   const feeHtml = snap.fee_includes ? `
@@ -990,6 +993,7 @@ function renderDetail() {
         ${snap.list_price ? formatPrice(snap.list_price) : 'No price'}
         <span class="detail-status-badge badge ${st.cls}">${st.label}</span>
       </div>
+      ${boughtLine(d.bought, snap.list_price, d.bought_estimate)}
       <div style="color: var(--text2); margin-top:4px; font-size:14px">${place}</div>
       ${d.mls_number ? `<div style="color:var(--text2); font-size:12px; margin-top:2px">MLS# ${escHtml(d.mls_number)}</div>` : ''}
 
@@ -1043,6 +1047,34 @@ function renderPriceHistory(points) {
           ${r.change}
         </div>
       </div>`).join('');
+}
+
+// What the seller likely paid: the home's last sale before this listing as [date, price], or,
+// with no sale on record, an estimate as [year, price] from similar homes' sales
+function boughtTag(b, est) {
+  if (b) return `<span class="bought">Bought ${formatPrice(b[1])} &middot; ${b[0].slice(0, 4)}</span>`;
+  if (est) return `<span class="bought">Est. ${formatPrice(est[1])} &middot; ~${est[0]}</span>`;
+  return '';
+}
+
+function askingVsPaid(asking, paid) {
+  return asking ? ` &middot; asking <span class="${asking < paid ? 'down' : 'up'}">${signedMoney(asking - paid)} (${pct(asking - paid, paid)})</span>` : '';
+}
+
+function boughtLine(b, asking, est) {
+  if (b) return `<div class="bought-detail">Seller bought it for ${formatPrice(b[1])} on ${formatDate(b[0])}${askingVsPaid(asking, b[1])}</div>`;
+  if (!est) return '';
+  return `<div class="bought-detail">Estimate: seller likely paid about ${formatPrice(est.price)} in ~${est.year}${askingVsPaid(asking, est.price)}
+    <div style="font-size:11px; opacity:.8; margin-top:2px">No sale on record. ${escHtml(est.year_basis)}; valued from ${est.comparables} sales of ${escHtml(est.scope)}, adjusted with Durham's price index.${est.type_basis ? ' ' + escHtml(est.type_basis) + '.' : ''}</div></div>`;
+}
+
+function renderPastSales(sales) {
+  if (!sales.length) return '';
+  return '<div class="section-title">Sales History</div>' + sales.slice().reverse().map(([date, price]) => `
+    <div class="history-item">
+      <div class="history-date">${formatDate(date)}</div>
+      <div class="history-price">Sold ${formatPrice(price)}</div>
+    </div>`).join('');
 }
 
 function renderForecast(f) {

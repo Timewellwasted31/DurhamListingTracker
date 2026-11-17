@@ -25,6 +25,8 @@ from listingtracker.db import (
     save_listing_images,
     get_listing_images,
     save_price_history,
+    save_past_sales,
+    save_area_sales,
 )
 from listingtracker.adapters.base import SiteAdapter, clean_parsed
 from listingtracker.adapters.strata import StrataAdapter
@@ -311,6 +313,9 @@ def fetch_listing(
         snap_id = add_snapshot(snap)
         snap.id = snap_id
         save_price_history(listing.id, parsed.get("list_date"), parsed.get("price_history") or [])
+        if "past_sales" in parsed:  # only sites that report sales; others leave what's stored
+            save_past_sales(listing.id, parsed["past_sales"])
+        save_area_sales(parsed.get("area_sales") or [])
 
         raw_path = _store_html(html, snap_id)
         snap.raw_html_path = raw_path

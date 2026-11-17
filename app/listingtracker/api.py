@@ -107,17 +107,30 @@ for _path, _file, _cache, _media in (
 @app.get("/api/listings")
 def list_listings(_=Depends(verify_api_key)):
     """Every active listing in summary form; the page filters, sorts and totals them itself."""
-    from listingtracker.db import get_all_listings, get_all_latest_snapshots, get_first_image_urls
+    from listingtracker.db import (
+        get_all_listings, get_all_latest_snapshots, get_first_image_urls, get_past_sales,
+        get_price_histories,
+    )
+    from listingtracker.pricehistory import last_purchase
+    from listingtracker import purchaseprice
 
     snapshots = get_all_latest_snapshots()
     images = get_first_image_urls()
-    return {"listings": [
-        _summary(lst, snapshots.get(lst.id), images.get(lst.id))
-        for lst in get_all_listings(active_only=True)
-    ]}
+    sales = get_past_sales()
+    list_dates = {lid: list_date for lid, (list_date, _) in get_price_histories().items()}
+    pool = purchaseprice.sales_pool()
+    listings = get_all_listings(active_only=True)
+    guesser = purchaseprice.type_guesser(listings, snapshots)
+    cards = []
+    for lst in listings:
+        snap = snapshots.get(lst.id)
+        bought = last_purchase(sales.get(lst.id, []), list_dates.get(lst.id))
+        est = None if bought else purchaseprice.estimate(purchaseprice.home_for(lst, snap, guesser), pool)
+        cards.append(_summary(lst, snap, images.get(lst.id), bought, est))
+    return {"listings": cards}
 
 
-def _summary(lst, snap, image_url) -> dict:
+def _summary(lst, snap, image_url, bought, estimate=None) -> dict:
     card = {
         "id": lst.id,
         "address": lst.address or "Unknown",
@@ -127,6 +140,9 @@ def _summary(lst, snap, image_url) -> dict:
         "favorited": lst.favorited,
         "date_added": lst.date_added.isoformat() if lst.date_added else None,
         "image_url": image_url,
+        "bought": list(bought) if bought else None,  # [date, price] the seller likely paid
+        # [year, price] estimated from similar sales, when no purchase is on record
+        "bought_est": [estimate.year, estimate.price] if estimate else None,
     }
     if snap:
         card.update(
@@ -149,9 +165,13 @@ def get_listing(listing_id: int, _=Depends(verify_api_key)):
     if not lst:
         raise HTTPException(status_code=404, detail="Listing not found")
 
+    from listingtracker import purchaseprice
+
     snapshots = get_snapshots_for_listing(listing_id)  # oldest first
     snap = snapshots[-1] if snapshots else None
     prices = summarize(listing_id, snapshots)
+    estimate = None if prices.bought else purchaseprice.estimate(
+        purchaseprice.home_for(lst, snap, purchaseprice.type_guesser()), purchaseprice.sales_pool())
 
     peers = {}
     if snap and snap.list_price and snap.beds:
@@ -165,6 +185,9 @@ def get_listing(listing_id: int, _=Depends(verify_api_key)):
         "days_on_market": prices.days_on_market,
         "price_history": [[d.isoformat(), p] for d, p in prices.points],
         "next_drop": prices.forecast.to_dict() if prices.forecast else None,
+        "past_sales": [list(s) for s in prices.past_sales] or None,
+        "bought": list(prices.bought) if prices.bought else None,
+        "bought_estimate": estimate.to_dict() if estimate else None,
         "images": [img["url"] for img in get_listing_images(listing_id)],
         "peer_stats": peers,
     })
@@ -406,9 +429,9 @@ def main() -> None:
     setup_logging()
 
     from listingtracker.db import init_db
-    from listingtracker.pricehistory import backfill_in_background
+    from listingtracker.savedpages import refresh_in_background
     init_db()
-    backfill_in_background()
+    refresh_in_background()
     PhoneServer(args.host, args.port, args.https_port, use_upnp=not args.no_upnp).run()
 
 

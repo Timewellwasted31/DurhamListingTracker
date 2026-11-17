@@ -106,6 +106,33 @@ CREATE TABLE IF NOT EXISTS price_events (
     price REAL,
     PRIMARY KEY (listing_id, kind, event_date)
 ) WITHOUT ROWID;
+
+-- Earlier sales of the same home, as the listing site records them
+CREATE TABLE IF NOT EXISTS past_sales (
+    listing_id INTEGER NOT NULL REFERENCES listings(id),
+    sold_date TEXT NOT NULL,
+    sold_price REAL NOT NULL,
+    PRIMARY KEY (listing_id, sold_date)
+) WITHOUT ROWID;
+
+-- Sales of homes in the area (comparables the listing pages show, and the sale records of their
+-- buildings), used to estimate what a seller paid when their own purchase isn't on record
+CREATE TABLE IF NOT EXISTS area_sales (
+    sale_key TEXT PRIMARY KEY,
+    sold_date TEXT NOT NULL,
+    sold_price REAL NOT NULL,
+    city TEXT,
+    address TEXT,
+    type TEXT,
+    beds INTEGER,
+    sqft INTEGER
+) WITHOUT ROWID;
+
+-- Small facts the app keeps about itself, e.g. which page-reading version filled the data
+CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 # Every table whose rows belong to one listing, as (table, column), children before `listings`
@@ -113,6 +140,7 @@ _LISTING_CHILDREN = (
     ("snapshots", "listing_id"),
     ("listing_images", "listing_id"),
     ("price_events", "listing_id"),
+    ("past_sales", "listing_id"),
     ("comparables", "listing_id"),
     ("comparables", "favorite_id"),
 )
@@ -842,9 +870,72 @@ def get_snapshot_ids() -> list[tuple[int, int, str]]:
         )]
 
 
-def has_price_history() -> bool:
+def save_past_sales(listing_id: int, sales: list[tuple[str, float]]) -> None:
+    """Replace a listing's earlier sales with what its page reported (possibly none)."""
     with _connect() as conn:
-        return conn.execute("SELECT 1 FROM price_events LIMIT 1").fetchone() is not None
+        conn.execute("DELETE FROM past_sales WHERE listing_id = ?", (listing_id,))
+        conn.executemany(
+            "INSERT OR REPLACE INTO past_sales (listing_id, sold_date, sold_price) VALUES (?, ?, ?)",
+            [(listing_id, d, p) for d, p in sales],
+        )
+        conn.commit()
+
+
+def get_past_sales(listing_id: Optional[int] = None) -> dict[int, list[tuple[str, float]]]:
+    """{listing_id: [(date, price)] oldest first} for one listing, or for all when none is given."""
+    where, args = ("WHERE listing_id = ?", (listing_id,)) if listing_id is not None else ("", ())
+    out: dict[int, list[tuple[str, float]]] = {}
+    with _connect() as conn:
+        for r in conn.execute(
+            f"SELECT listing_id, sold_date, sold_price FROM past_sales {where} "
+            "ORDER BY listing_id, sold_date", args,
+        ):
+            out.setdefault(r["listing_id"], []).append((r["sold_date"], r["sold_price"]))
+    return out
+
+
+AREA_SALE_FIELDS = ("sale_key", "sold_date", "sold_price", "city", "address", "type", "beds", "sqft")
+
+
+def save_area_sales(sales: list[dict]) -> None:
+    """Add area sales; one seen again (same key) is updated with the newer details."""
+    if not sales:
+        return
+    with _connect() as conn:
+        conn.executemany(
+            f"INSERT OR REPLACE INTO area_sales ({', '.join(AREA_SALE_FIELDS)}) "
+            f"VALUES ({', '.join('?' * len(AREA_SALE_FIELDS))})",
+            [tuple(s.get(f) for f in AREA_SALE_FIELDS) for s in sales],
+        )
+        conn.commit()
+
+
+def get_area_sales() -> list[dict]:
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(f"SELECT {', '.join(AREA_SALE_FIELDS)} FROM area_sales")]
+
+
+def fill_missing_property_type(listing_id: int, property_type: str) -> None:
+    """Set the latest snapshot's property type if it has none."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE snapshots SET property_type = ? WHERE id = "
+            "(SELECT MAX(id) FROM snapshots WHERE listing_id = ?) AND property_type IS NULL",
+            (property_type, listing_id),
+        )
+        conn.commit()
+
+
+def get_state(key: str) -> Optional[str]:
+    with _connect() as conn:
+        row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+
+def set_state(key: str, value: str) -> None:
+    with _connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
 
 
 def update_image_local_path(image_id: int, local_path: str) -> None:

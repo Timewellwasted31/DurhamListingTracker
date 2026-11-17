@@ -419,6 +419,7 @@ class DetailPane(QWidget):
         hdr_layout.addWidget(self.status_label)
 
         self.price_hero = QLabel()
+        self.price_hero.setTextFormat(Qt.TextFormat.RichText)
         self.price_hero.setStyleSheet(BIG_NUM + " background: transparent;")
         hdr_layout.addWidget(self.price_hero)
 
@@ -647,7 +648,20 @@ class DetailPane(QWidget):
 
         # Price hero
         if snap and snap.list_price:
-            self.price_hero.setText(f"${snap.list_price:,.0f}")
+            hero = f"${snap.list_price:,.0f}"
+            # What the seller likely paid, in smaller text beside it: their recorded purchase, or
+            # an estimate from similar homes' sales when there is none
+            bought = self._prices.bought
+            if bought:
+                paid = f"Bought ${bought[1]:,.0f} · {bought[0][:4]}"
+            else:
+                from listingtracker import purchaseprice
+                est = purchaseprice.estimate(purchaseprice.home_for(listing, snap, purchaseprice.type_guesser()),
+                                             purchaseprice.sales_pool())
+                paid = f"Est. ${est.price:,.0f} · ~{est.year}" if est else ""
+            if paid:
+                hero += f'&nbsp;&nbsp;<span style="font-size:12px; font-weight:normal; color:#999;">{paid}</span>'
+            self.price_hero.setText(hero)
             self.price_hero.setVisible(True)
         else:
             self.price_hero.setVisible(False)

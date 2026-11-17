@@ -72,7 +72,7 @@ class StrataAdapter(SiteAdapter):
             result["status"] = self._map_status(state)
             result["broker"] = listing.get("brokerage")
             result["possession_date"] = listing.get("possession")
-            result["property_type"] = listing.get("propertyType")
+            result["property_type"] = listing.get("propertyType") or listing.get("propertySubType")
             result["year_built"] = listing.get("yearBuilt")
             result["days_on_market"] = listing.get("daysOnMarket")
             result["exposure"] = listing.get("exposure")
@@ -85,6 +85,7 @@ class StrataAdapter(SiteAdapter):
                 result["rent_controlled"] = "Yes" if listing["rentControlled"] else "No"
             if listing.get("mlsNumber"):
                 result["list_date"], result["price_history"] = self._price_history(rsc, listing["mlsNumber"])
+            result["past_sales"] = self._past_sales(rsc, urlparse(url).path.rstrip("/").split("/")[-1])
         else:
             logger.debug("RSC listing data not found; falling back to meta tags")
             result["list_price"] = self._price_from_dom(html)
@@ -163,8 +164,37 @@ class StrataAdapter(SiteAdapter):
         if self._detect_power_of_sale(html):
             result["power_of_sale"] = True
 
+        result["area_sales"] = self._area_sales(rsc, result.get("city"), result.get("address"),
+                                                result.get("property_type"))
         result["parse_errors"] = "; ".join(errors) if errors else None
         return result
+
+    @classmethod
+    def _area_sales(cls, rsc: str, city: Optional[str], address: Optional[str],
+                    property_type: Optional[str]) -> list[dict]:
+        """Every sale record on the page, each with its unit's address, bedrooms and size. The
+        records carry no home type; those in this listing's own building take its type."""
+        from listingtracker.purchaseprice import building_key
+        own_building = building_key(address)
+        sales = {}
+        for record in rsc.split('"__typename":"PropertyListing"'):  # one listing object each
+            m = cls._SALE_RECORD.search(record)
+            if not m or m.group(1) != "SOLD" or not m.group(3) or m.group(4) == "null":
+                continue
+            field = lambda k: (re.findall(r'"%s"\s*:\s*"?([^",}]*)' % k, record) or [None])[-1]
+            rec_address = field("address")
+            beds, sqft = field("bedroomCount"), field("sqftSizeHigh") or field("sqftSizeLow")
+            sales[(m.group(2), m.group(3))] = {
+                "sale_key": f"strata:{rec_address}:{m.group(2)}:{m.group(3)}",
+                "sold_date": m.group(3),
+                "sold_price": float(m.group(4)),
+                "city": city,
+                "address": rec_address,
+                "type": property_type if own_building and building_key(rec_address) == own_building else None,
+                "beds": int(beds) if beds and beds.isdigit() else None,
+                "sqft": int(sqft) if sqft and sqft.isdigit() else None,
+            }
+        return list(sales.values())
 
     @staticmethod
     def _is_rental_page(html: str) -> bool:
@@ -274,6 +304,7 @@ class StrataAdapter(SiteAdapter):
                 ("brokerage", r'"brokerage"\s*:\s*"([^"]+)"'),
                 ("urlContext", r'"urlContext"\s*:\s*"([^"]+)"'),
                 ("propertyType", r'"propertyType"\s*:\s*"([^"]+)"'),
+                ("propertySubType", r'"propertySubType"\s*:\s*"([^"]+)"'),
                 ("ensuiteLaundry", r'"ensuiteLaundry"\s*:\s*(true|false)'),
                 ("outdoorSpace", r'"outdoorSpace"\s*:\s*"([^"]{1,50})"'),
                 ("rentControlled", r'"rentControlled"\s*:\s*(true|false)'),
@@ -375,6 +406,25 @@ class StrataAdapter(SiteAdapter):
             if points:
                 return points[0][0], points
         return None, []
+
+    # Each past listing of a unit carries its state, the unit's id and, once sold, the sale
+    _SALE_RECORD = re.compile(
+        r'"propertyListingState"\s*:\s*"([A-Z_]+)"\s*,\s*"propertyUnitUid"\s*:\s*"([^"]+)"\s*,\s*'
+        r'"soldDate"\s*:\s*(?:"(\d{4}-\d{2}-\d{2})[^"]*"|null)\s*,\s*"soldPrice"\s*:\s*([\d.]+|null)'
+    )
+
+    @classmethod
+    def _past_sales(cls, rsc: str, unit_uid: str) -> list[tuple[str, float]]:
+        """Earlier sales of this unit as [(date, price)] oldest first. The page also mentions other
+        units in the building, so records are matched to this one by the unit id in its URL.
+        A leased unit is also marked SOLD, with the monthly rent as its price; those are left out."""
+        from listingtracker.purchaseprice import MIN_SALE_PRICE
+        sales = {
+            (date, float(price))
+            for state, uid, date, price in cls._SALE_RECORD.findall(rsc)
+            if uid == unit_uid and state == "SOLD" and date and price != "null" and float(price) >= MIN_SALE_PRICE
+        }
+        return sorted(sales)
 
     @staticmethod
     def _map_status(state: str) -> str:

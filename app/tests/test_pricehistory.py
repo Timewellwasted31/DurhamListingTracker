@@ -49,6 +49,38 @@ def test_wahi_opening_price_is_added_only_when_it_starts_on_the_list_date():
     assert WahiAdapter._price_history(unchanged) == ("2026-11-06", [("2026-11-06", 1099990.0)])
 
 
+def test_strata_sales_are_matched_to_this_unit():
+    from listingtracker.adapters.strata import StrataAdapter
+    rsc = (
+        '{"propertyListingState":"SOLD","propertyUnitUid":"31-unit-104","soldDate":"2015-05-11","soldPrice":338800}'
+        '{"propertyListingState":"SOLD","propertyUnitUid":"31-unit-105","soldDate":"2019-02-01","soldPrice":410000}'
+        '{"propertyListingState":"TERMINATED","propertyUnitUid":"31-unit-104","soldDate":null,"soldPrice":null}'
+        '{"propertyListingState":"SOLD","propertyUnitUid":"31-unit-104","soldDate":"2015-05-11","soldPrice":338800}'
+        '{"propertyListingState":"ACTIVE","propertyUnitUid":"31-unit-104","soldDate":null,"soldPrice":null}'
+        '{"propertyListingState":"SOLD","propertyUnitUid":"31-unit-104","soldDate":"2025-08-01","soldPrice":2500}'  # a lease
+    )
+    assert StrataAdapter._past_sales(rsc, "31-unit-104") == [("2015-05-11", 338800.0)]
+
+
+def test_wahi_sales_leave_out_leases_and_the_current_listing():
+    from listingtracker.adapters.wahi import WahiAdapter
+    listing = {"mlsId": "E3", "historicalData": [
+        {"mlsId": "E1", "statusType": "Sold", "type": "Sale", "soldPrice": "485000", "soldDate": "2024-06-26T04:00:00Z"},
+        {"mlsId": "E2", "statusType": "Sold", "type": "Lease", "soldPrice": "2950", "soldDate": "2022-07-18T00:00:00Z"},
+        {"mlsId": "E4", "statusType": "Terminated", "type": "Sale", "soldPrice": None, "soldDate": None},
+        {"mlsId": "E3", "statusType": "Sold", "type": "Sale", "soldPrice": "500000", "soldDate": "2026-11-01T00:00:00Z"},
+    ]}
+    assert WahiAdapter._past_sales(listing) == [("2024-06-26", 485000.0)]
+
+
+def test_seller_paid_the_last_sale_before_this_listing():
+    sales = [("2009-03-01", 250000.0), ("2015-05-11", 338800.0), ("2026-11-01", 500000.0)]
+    assert ph.last_purchase(sales, "2026-06-23") == ("2015-05-11", 338800.0)
+    assert ph.last_purchase(sales, None) == ("2026-11-01", 500000.0)
+    assert ph.last_purchase(sales, "2001-01-01") is None
+    assert ph.last_purchase([], "2026-06-23") is None
+
+
 # --- Timeline ---
 
 def test_timeline_keeps_one_entry_per_change():
