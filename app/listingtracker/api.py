@@ -10,6 +10,7 @@ Or with uvicorn:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -62,6 +63,8 @@ def _load_or_create_api_key() -> str:
 
 
 _api_key: str = ""
+_http_port: int = 8000
+_remote = None  # listingtracker.remote.RemoteAccess once main() has started HTTPS
 
 
 def _get_api_key() -> str:
@@ -423,34 +426,25 @@ async def scan_comparables(_=Depends(verify_api_key)):
 
 @app.get("/api/key-check")
 async def key_check(_=Depends(verify_api_key)):
-    return {"ok": True}
+    """Confirms the key, and tells a paired device where the server can currently be reached."""
+    return {"ok": True, "urls": _remote.urls() if _remote else []}
 
 
 @app.get("/api/pair-info")
-async def pair_info():
-    """Return pairing data (server URL hint + API key) for QR code generation.
-    No auth required — called by the desktop app itself to build the QR."""
-    import socket, subprocess
-    local_ip = "127.0.0.1"
-    # Prefer Tailscale IP for remote access
-    try:
-        result = subprocess.run(
-            [r"C:\Program Files\Tailscale\tailscale.exe", "ip", "-4"],
-            capture_output=True, text=True, timeout=3
+async def pair_info(request: Request):
+    """Pairing data for the desktop app's QR code. It includes the API key, so it only answers
+    requests made from this computer."""
+    if not request.client or request.client.host not in ("127.0.0.1", "::1"):
+        raise HTTPException(status_code=403, detail="Pairing data is only available on this computer")
+    from listingtracker.remote import lan_ip
+    info = {"url": f"http://{lan_ip()}:{_http_port}", "key": _get_api_key()}
+    if _remote:
+        info.update(
+            urls=_remote.urls(),
+            fp=_remote.fingerprint,
+            remote={"status": _remote.status, "message": _remote.message},
         )
-        if result.returncode == 0 and result.stdout.strip():
-            local_ip = result.stdout.strip()
-    except Exception:
-        pass
-    if local_ip == "127.0.0.1":
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-        except Exception:
-            pass
-    return {"url": f"http://{local_ip}:8000", "key": _get_api_key()}
+    return info
 
 
 def _snap_dict(snap) -> dict:
@@ -504,6 +498,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Durham Listing Tracker API server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Port (default 8000)")
+    parser.add_argument("--https-port", type=int, default=8443,
+                        help="Encrypted port for paired devices (default 8443)")
+    parser.add_argument("--no-upnp", action="store_true",
+                        help="Do not ask the router to forward the HTTPS port")
     args = parser.parse_args()
 
     ensure_directories()
@@ -512,12 +510,33 @@ def main() -> None:
     from listingtracker.db import init_db
     init_db()
 
+    from listingtracker.remote import CERT_PATH, KEY_PATH, RemoteAccess, ensure_certificate
+
+    global _http_port, _remote
+    _http_port = args.port
     api_key = _get_api_key()
-    logger.info("API server starting on %s:%d", args.host, args.port)
+    _remote = RemoteAccess(args.https_port, ensure_certificate(), use_upnp=not args.no_upnp)
+    logger.info("API server starting on %s:%d (HTTPS on %d)", args.host, args.port, args.https_port)
     logger.info("API key: %s", api_key)
     logger.info("Mobile app: http://localhost:%d", args.port)
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    # proxy_headers off: the loopback check in pair_info must see the real peer address
+    servers = [
+        uvicorn.Server(uvicorn.Config(
+            app, host=args.host, port=args.port, log_level="info", proxy_headers=False)),
+        uvicorn.Server(uvicorn.Config(
+            app, host=args.host, port=args.https_port, log_level="info", proxy_headers=False,
+            ssl_certfile=str(CERT_PATH), ssl_keyfile=str(KEY_PATH))),
+    ]
+
+    async def serve() -> None:
+        await asyncio.gather(*(s.serve() for s in servers))
+
+    _remote.start()
+    try:
+        asyncio.run(serve())
+    finally:
+        _remote.stop()
 
 
 if __name__ == "__main__":

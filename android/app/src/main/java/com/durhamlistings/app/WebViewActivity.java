@@ -2,26 +2,29 @@ package com.durhamlistings.app;
 
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
+import android.net.http.SslError;
 import android.os.Bundle;
 import android.view.KeyEvent;
+import android.webkit.JavascriptInterface;
+import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
+import android.webkit.WebStorage;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 public class WebViewActivity extends AppCompatActivity {
 
-    private static final String PREFS = "durham_listings";
-    private static final String KEY_SERVER = "server_url";
-    private static final String KEY_API = "api_key";
-
     private WebView webView;
     private SwipeRefreshLayout swipeRefresh;
     private String serverUrl;
     private String apiKey;
+    private String certFp;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -30,11 +33,13 @@ public class WebViewActivity extends AppCompatActivity {
 
         serverUrl = getIntent().getStringExtra("server_url");
         apiKey = getIntent().getStringExtra("api_key");
+        certFp = getIntent().getStringExtra("cert_fp");
 
         if (serverUrl == null || apiKey == null) {
-            SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-            serverUrl = prefs.getString(KEY_SERVER, "");
-            apiKey = prefs.getString(KEY_API, "");
+            SharedPreferences prefs = getSharedPreferences(ServerLink.PREFS, MODE_PRIVATE);
+            serverUrl = prefs.getString(ServerLink.KEY_SERVER, "");
+            apiKey = prefs.getString(ServerLink.KEY_API, "");
+            certFp = prefs.getString(ServerLink.KEY_FP, "");
         }
 
         if (serverUrl.isEmpty() || apiKey.isEmpty()) {
@@ -49,8 +54,8 @@ public class WebViewActivity extends AppCompatActivity {
         setupWebView();
         setupSwipeRefresh();
 
-        String appUrl = serverUrl + "?key=" + apiKey;
-        webView.loadUrl(appUrl);
+        // The key rides in the fragment, which the page reads but the browser never sends
+        webView.loadUrl(serverUrl + "/#key=" + Uri.encode(apiKey));
     }
 
     private void setupWebView() {
@@ -71,19 +76,72 @@ public class WebViewActivity extends AppCompatActivity {
             }
 
             @Override
+            public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
+                // The server's certificate is self-signed; accept it only if it is the paired one
+                if (ServerLink.matches(error.getCertificate(), certFp)) {
+                    handler.proceed();
+                } else {
+                    handler.cancel();
+                }
+            }
+
+            @Override
             public void onReceivedError(WebView view, int errorCode,
                                         String description, String failingUrl) {
-                // If the server becomes unreachable, go back to pairing
+                // If the server becomes unreachable, offer a retry; the pairing itself is kept
                 if (errorCode == ERROR_CONNECT || errorCode == ERROR_TIMEOUT ||
                         errorCode == ERROR_HOST_LOOKUP) {
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().clear().apply();
-                    startActivity(new Intent(WebViewActivity.this, PairActivity.class));
+                    Intent intent = new Intent(WebViewActivity.this, PairActivity.class);
+                    intent.putExtra(PairActivity.EXTRA_CONNECTION_LOST, true);
+                    startActivity(intent);
                     finish();
                 }
             }
         });
 
         webView.setWebChromeClient(new WebChromeClient());
+        webView.addJavascriptInterface(new AppBridge(), "AndroidApp");
+    }
+
+    /** Actions the page's connection menu hands to the app, which owns the saved pairing. */
+    private final class AppBridge {
+        @JavascriptInterface
+        public void reconnect() {
+            runOnUiThread(() -> {
+                if (!fromServerPage()) return;
+                // PairActivity tries every saved address and keeps the first that answers
+                startActivity(new Intent(WebViewActivity.this, PairActivity.class));
+                finish();
+            });
+        }
+
+        @JavascriptInterface
+        public void disconnect() {
+            runOnUiThread(() -> {
+                if (!fromServerPage()) return;
+                new AlertDialog.Builder(WebViewActivity.this)
+                        .setTitle(R.string.disconnect_title)
+                        .setMessage(R.string.disconnect_message)
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .setPositiveButton(R.string.disconnect, (d, w) -> forgetServer())
+                        .show();
+            });
+        }
+    }
+
+    /** The bridge is only honoured while the paired server's own page is showing. */
+    private boolean fromServerPage() {
+        String current = webView.getUrl();
+        return current != null && current.startsWith(serverUrl + "/");
+    }
+
+    private void forgetServer() {
+        getSharedPreferences(ServerLink.PREFS, MODE_PRIVATE).edit().clear().apply();
+        webView.clearCache(true);
+        WebStorage.getInstance().deleteAllData();
+        startActivity(new Intent(this, PairActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK));
+        finish();
     }
 
     private void setupSwipeRefresh() {

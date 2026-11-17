@@ -15,135 +15,221 @@
         android:paddingStart="32dp"
         android:paddingEnd="32dp"
         android:paddingTop="32dp"
-        android:paddingBottom="32dp">
+        android:paddingBottom="16dp">
 
         <android.widget.Space
             android:layout_width="1dp"
             android:layout_height="0dp"
             android:layout_weight="1" />
 
-        <!-- App Icon -->
-        <ImageView
-            android:layout_width="80dp"
-            android:layout_height="80dp"
-            android:src="@mipmap/ic_launcher"
-            android:layout_marginBottom="16dp"
-            android:contentDescription="@string/app_name" />
-
-        <!-- Title -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/pair_title"
-            android:textSize="28sp"
-            android:textStyle="bold"
-            android:textColor="@color/accent"
-            android:layout_marginBottom="8dp" />
-
-        <!-- Subtitle -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/pair_subtitle"
-            android:textSize="14sp"
-            android:textColor="@color/text_secondary"
-            android:layout_marginBottom="32dp" />
-
-        <!-- Scan QR Button -->
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnScanQr"
-            android:layout_width="match_parent"
-            android:layout_height="56dp"
-            android:text="@string/scan_qr"
-            android:textSize="16sp"
-            android:textAllCaps="false"
-            app:backgroundTint="@color/accent" />
-
-        <!-- Or Divider -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/or_divider"
-            android:textSize="13sp"
-            android:textColor="@color/text_secondary"
-            android:layout_marginTop="20dp"
-            android:layout_marginBottom="20dp" />
-
-        <!-- Server URL Input -->
-        <com.google.android.material.textfield.TextInputLayout
+        <!-- QR pairing: the main way in -->
+        <LinearLayout
+            android:id="@+id/groupQr"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="12dp"
-            android:hint="@string/server_url_hint"
-            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-            app:boxStrokeColor="@color/accent"
-            app:hintTextColor="@color/text_secondary">
+            android:orientation="vertical"
+            android:gravity="center_horizontal">
 
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/inputServerUrl"
+            <ImageView
+                android:layout_width="96dp"
+                android:layout_height="96dp"
+                android:src="@mipmap/ic_launcher"
+                android:layout_marginBottom="16dp"
+                android:contentDescription="@string/app_name" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/pair_title"
+                android:textSize="28sp"
+                android:textStyle="bold"
+                android:textColor="@color/accent"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/pair_subtitle"
+                android:textSize="15sp"
+                android:textColor="@color/text_secondary"
+                android:layout_marginBottom="40dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnScanQr"
+                android:layout_width="match_parent"
+                android:layout_height="72dp"
+                android:text="@string/scan_qr"
+                android:textSize="18sp"
+                android:textAllCaps="false"
+                app:cornerRadius="12dp"
+                app:backgroundTint="@color/accent" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/qr_steps"
+                android:textSize="13sp"
+                android:textColor="@color/text_secondary"
+                android:gravity="center"
+                android:lineSpacingExtra="2dp" />
+        </LinearLayout>
+
+        <!-- Manual entry -->
+        <LinearLayout
+            android:id="@+id/groupManual"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/manual_title"
+                android:textSize="24sp"
+                android:textStyle="bold"
+                android:textColor="@color/accent"
+                android:layout_marginBottom="16dp" />
+
+            <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="textUri"
-                android:textColor="@color/text_primary"
-                android:textColorHint="@color/text_secondary" />
-        </com.google.android.material.textfield.TextInputLayout>
+                android:text="@string/manual_steps"
+                android:textSize="14sp"
+                android:textColor="@color/text_secondary"
+                android:lineSpacingExtra="2dp"
+                android:padding="16dp"
+                android:background="@color/bg_card"
+                android:layout_marginBottom="24dp" />
 
-        <!-- API Key Input -->
-        <com.google.android.material.textfield.TextInputLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="20dp"
-            android:hint="@string/api_key_hint"
-            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-            app:endIconMode="password_toggle"
-            app:boxStrokeColor="@color/accent"
-            app:hintTextColor="@color/text_secondary">
-
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/inputApiKey"
+            <com.google.android.material.textfield.TextInputLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="textPassword"
-                android:textColor="@color/text_primary"
-                android:textColorHint="@color/text_secondary" />
-        </com.google.android.material.textfield.TextInputLayout>
+                android:layout_marginBottom="12dp"
+                android:hint="@string/server_url_hint"
+                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                app:boxStrokeColor="@color/accent"
+                app:hintTextColor="@color/text_secondary">
 
-        <!-- Connect Button -->
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnConnect"
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/inputServerUrl"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="textUri"
+                    android:textColor="@color/text_primary"
+                    android:textColorHint="@color/text_secondary" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.textfield.TextInputLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="20dp"
+                android:hint="@string/api_key_hint"
+                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                app:endIconMode="password_toggle"
+                app:boxStrokeColor="@color/accent"
+                app:hintTextColor="@color/text_secondary">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/inputApiKey"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="textPassword"
+                    android:textColor="@color/text_primary"
+                    android:textColorHint="@color/text_secondary" />
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnConnect"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:text="@string/connect"
+                android:textSize="16sp"
+                android:textAllCaps="false"
+                app:backgroundTint="@color/accent" />
+        </LinearLayout>
+
+        <!-- A saved server that did not answer -->
+        <LinearLayout
+            android:id="@+id/groupUnreachable"
             android:layout_width="match_parent"
-            android:layout_height="56dp"
-            android:text="@string/connect"
-            android:textSize="16sp"
-            android:textAllCaps="false"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            app:strokeColor="@color/accent"
-            android:textColor="@color/accent" />
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center_horizontal"
+            android:visibility="gone">
 
-        <!-- Error Text -->
+            <ImageView
+                android:layout_width="80dp"
+                android:layout_height="80dp"
+                android:src="@mipmap/ic_launcher"
+                android:layout_marginBottom="24dp"
+                android:contentDescription="@string/app_name" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/unreachable_title"
+                android:textSize="22sp"
+                android:textStyle="bold"
+                android:textColor="@color/text_primary"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/server_unreachable"
+                android:textSize="14sp"
+                android:textColor="@color/text_secondary"
+                android:gravity="center"
+                android:layout_marginBottom="32dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnRetry"
+                android:layout_width="match_parent"
+                android:layout_height="64dp"
+                android:text="@string/try_again"
+                android:textSize="17sp"
+                android:textAllCaps="false"
+                app:cornerRadius="12dp"
+                app:backgroundTint="@color/accent" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnForget"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/forget_server"
+                android:textAllCaps="false"
+                android:textColor="@color/text_secondary"
+                style="@style/Widget.MaterialComponents.Button.TextButton" />
+        </LinearLayout>
+
         <TextView
             android:id="@+id/txtError"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:textColor="#FFE53935"
             android:textSize="13sp"
-            android:layout_marginTop="12dp"
+            android:gravity="center"
+            android:layout_marginTop="16dp"
             android:visibility="gone" />
-
-        <!-- Network Hint -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/same_network_hint"
-            android:textSize="11sp"
-            android:textColor="#FF666666"
-            android:fontFamily="sans-serif-light"
-            android:layout_marginTop="24dp" />
 
         <android.widget.Space
             android:layout_width="1dp"
             android:layout_height="0dp"
             android:layout_weight="1" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnToggleMode"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/enter_manually"
+            android:textAllCaps="false"
+            android:textSize="15sp"
+            android:textColor="@color/accent"
+            style="@style/Widget.MaterialComponents.Button.TextButton" />
 
     </LinearLayout>
 </ScrollView>

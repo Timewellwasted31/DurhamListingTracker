@@ -4,10 +4,12 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.view.View;
+import android.webkit.WebStorage;
 import android.widget.TextView;
-import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.google.android.material.button.MaterialButton;
@@ -16,52 +18,105 @@ import com.journeyapps.barcodescanner.ScanContract;
 import com.journeyapps.barcodescanner.ScanIntentResult;
 import com.journeyapps.barcodescanner.ScanOptions;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class PairActivity extends AppCompatActivity {
 
-    private static final String PREFS = "durham_listings";
-    private static final String KEY_SERVER = "server_url";
-    private static final String KEY_API = "api_key";
+    static final String EXTRA_CONNECTION_LOST = "connection_lost";
 
+    private enum Mode { QR, MANUAL, UNREACHABLE }
+
+    private View groupQr, groupManual, groupUnreachable;
     private TextInputEditText inputServerUrl, inputApiKey;
     private TextView txtError;
-    private MaterialButton btnConnect, btnScanQr;
+    private MaterialButton btnScanQr, btnConnect, btnRetry, btnForget, btnToggleMode;
+    private Mode mode = Mode.QR;
+    private CharSequence busyLabel;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+
+    private List<String> savedUrls = Collections.emptyList();
+    private String savedKey = "";
+    private String savedFp = "";
 
     private final ActivityResultLauncher<ScanOptions> qrLauncher =
             registerForActivityResult(new ScanContract(), this::onQrResult);
 
+    private final OnBackPressedCallback backToQr = new OnBackPressedCallback(false) {
+        @Override
+        public void handleOnBackPressed() {
+            showMode(Mode.QR);
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        getOnBackPressedDispatcher().addCallback(this, backToQr);
 
-        // If already paired, go straight to the app
-        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        String savedUrl = prefs.getString(KEY_SERVER, "");
-        String savedKey = prefs.getString(KEY_API, "");
-        if (!savedUrl.isEmpty() && !savedKey.isEmpty()) {
-            verifyAndLaunch(savedUrl, savedKey, true);
+        SharedPreferences prefs = getSharedPreferences(ServerLink.PREFS, MODE_PRIVATE);
+        savedUrls = loadUrls(prefs);
+        savedKey = prefs.getString(ServerLink.KEY_API, "");
+        savedFp = prefs.getString(ServerLink.KEY_FP, "");
+
+        boolean paired = !savedUrls.isEmpty() && !savedKey.isEmpty();
+        if (paired && !getIntent().getBooleanExtra(EXTRA_CONNECTION_LOST, false)) {
+            verifyAndLaunch(savedUrls, savedKey, savedFp, null);
             return;
         }
 
-        setContentView(R.layout.activity_pair);
+        showPairScreen();
+        showMode(paired ? Mode.UNREACHABLE : Mode.QR);
+    }
 
+    private static List<String> loadUrls(SharedPreferences prefs) {
+        List<String> urls = new ArrayList<>();
+        try {
+            JSONArray arr = new JSONArray(prefs.getString(ServerLink.KEY_URLS, "[]"));
+            for (int i = 0; i < arr.length(); i++) urls.add(arr.getString(i));
+        } catch (Exception ignored) {
+        }
+        String last = prefs.getString(ServerLink.KEY_SERVER, "");
+        if (!last.isEmpty() && !urls.contains(last)) urls.add(0, last);
+        return urls;
+    }
+
+    private void showPairScreen() {
+        setContentView(R.layout.activity_pair);
+        groupQr = findViewById(R.id.groupQr);
+        groupManual = findViewById(R.id.groupManual);
+        groupUnreachable = findViewById(R.id.groupUnreachable);
         inputServerUrl = findViewById(R.id.inputServerUrl);
         inputApiKey = findViewById(R.id.inputApiKey);
         txtError = findViewById(R.id.txtError);
-        btnConnect = findViewById(R.id.btnConnect);
         btnScanQr = findViewById(R.id.btnScanQr);
+        btnConnect = findViewById(R.id.btnConnect);
+        btnRetry = findViewById(R.id.btnRetry);
+        btnForget = findViewById(R.id.btnForget);
+        btnToggleMode = findViewById(R.id.btnToggleMode);
 
         btnScanQr.setOnClickListener(v -> startQrScan());
         btnConnect.setOnClickListener(v -> manualConnect());
+        btnRetry.setOnClickListener(v -> verifyAndLaunch(savedUrls, savedKey, savedFp, btnRetry));
+        btnForget.setOnClickListener(v -> confirmForget());
+        btnToggleMode.setOnClickListener(v -> showMode(mode == Mode.MANUAL ? Mode.QR : Mode.MANUAL));
+    }
+
+    private void showMode(Mode next) {
+        mode = next;
+        groupQr.setVisibility(next == Mode.QR ? View.VISIBLE : View.GONE);
+        groupManual.setVisibility(next == Mode.MANUAL ? View.VISIBLE : View.GONE);
+        groupUnreachable.setVisibility(next == Mode.UNREACHABLE ? View.VISIBLE : View.GONE);
+        btnToggleMode.setVisibility(next == Mode.UNREACHABLE ? View.GONE : View.VISIBLE);
+        btnToggleMode.setText(next == Mode.MANUAL ? R.string.back_to_qr : R.string.enter_manually);
+        txtError.setVisibility(View.GONE);
+        backToQr.setEnabled(next == Mode.MANUAL);
     }
 
     private void startQrScan() {
@@ -80,17 +135,20 @@ public class PairActivity extends AppCompatActivity {
 
         try {
             JSONObject json = new JSONObject(result.getContents());
-            String url = json.optString("url", "");
             String key = json.optString("key", "");
+            String fp = ServerLink.normalize(json.optString("fp", ""));
 
-            if (url.isEmpty() || key.isEmpty()) {
+            List<String> urls = new ArrayList<>();
+            JSONArray arr = json.optJSONArray("urls");
+            for (int i = 0; arr != null && i < arr.length(); i++) urls.add(arr.getString(i));
+            String legacy = json.optString("url", "");
+            if (!legacy.isEmpty() && !urls.contains(legacy)) urls.add(legacy);
+
+            if (urls.isEmpty() || key.isEmpty()) {
                 showError(getString(R.string.invalid_qr));
                 return;
             }
-
-            inputServerUrl.setText(url);
-            inputApiKey.setText(key);
-            verifyAndLaunch(url, key, false);
+            verifyAndLaunch(urls, key, fp, btnScanQr);
 
         } catch (Exception e) {
             showError(getString(R.string.invalid_qr));
@@ -98,81 +156,101 @@ public class PairActivity extends AppCompatActivity {
     }
 
     private void manualConnect() {
-        String url = inputServerUrl.getText() != null ? inputServerUrl.getText().toString().trim() : "";
+        String text = inputServerUrl.getText() != null ? inputServerUrl.getText().toString().trim() : "";
         String key = inputApiKey.getText() != null ? inputApiKey.getText().toString().trim() : "";
 
-        if (url.isEmpty() || key.isEmpty()) {
-            showError("Please enter both the server URL and API key.");
+        if (text.isEmpty() || key.isEmpty()) {
+            showError("Please enter both the server address and API key.");
             return;
         }
 
-        // Strip trailing slash
-        if (url.endsWith("/")) url = url.substring(0, url.length() - 1);
+        // A secure address carries the certificate fingerprint after '#'
+        String url = text, fp = "";
+        int hash = text.indexOf('#');
+        if (hash >= 0) {
+            url = text.substring(0, hash);
+            fp = ServerLink.normalize(text.substring(hash + 1));
+        }
+        while (url.endsWith("/")) url = url.substring(0, url.length() - 1);
+        if (!url.contains("://")) url = "http://" + url;
 
-        verifyAndLaunch(url, key, false);
-    }
-
-    private void verifyAndLaunch(String serverUrl, String apiKey, boolean silent) {
-        if (!silent) {
-            btnConnect.setEnabled(false);
-            btnScanQr.setEnabled(false);
-            btnConnect.setText(R.string.connecting);
-            txtError.setVisibility(View.GONE);
+        if (url.startsWith("https://") && fp.isEmpty()) {
+            showError(getString(R.string.fingerprint_needed));
+            return;
         }
 
-        executor.execute(() -> {
-            boolean ok = false;
-            try {
-                URL url = new URL(serverUrl + "/api/key-check?key=" + apiKey);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(5000);
-                int code = conn.getResponseCode();
-                ok = (code == 200);
-                conn.disconnect();
-            } catch (Exception e) {
-                // Connection failed
-            }
+        verifyAndLaunch(Collections.singletonList(url), key, fp, btnConnect);
+    }
 
-            final boolean success = ok;
+    /** `trigger` is the button the user pressed, or null for the silent check at startup. */
+    private void verifyAndLaunch(List<String> urls, String apiKey, String fp, MaterialButton trigger) {
+        if (trigger != null) setBusy(trigger, true);
+
+        executor.execute(() -> {
+            ServerLink.Reached reached = ServerLink.firstReachable(urls, apiKey, fp);
+
             runOnUiThread(() -> {
-                if (success) {
-                    // Save credentials
-                    getSharedPreferences(PREFS, MODE_PRIVATE)
+                if (isDestroyed()) return;
+                if (reached != null) {
+                    // The server reports its current addresses, so a changed home IP is picked up
+                    // the next time the phone reaches it by any route.
+                    List<String> known = new ArrayList<>(reached.urls.isEmpty() ? urls : reached.urls);
+                    if (!known.contains(reached.url)) known.add(reached.url);
+
+                    getSharedPreferences(ServerLink.PREFS, MODE_PRIVATE)
                             .edit()
-                            .putString(KEY_SERVER, serverUrl)
-                            .putString(KEY_API, apiKey)
+                            .putString(ServerLink.KEY_SERVER, reached.url)
+                            .putString(ServerLink.KEY_URLS, new JSONArray(known).toString())
+                            .putString(ServerLink.KEY_API, apiKey)
+                            .putString(ServerLink.KEY_FP, fp)
                             .apply();
 
-                    // Launch the app
                     Intent intent = new Intent(this, WebViewActivity.class);
-                    intent.putExtra("server_url", serverUrl);
+                    intent.putExtra("server_url", reached.url);
                     intent.putExtra("api_key", apiKey);
+                    intent.putExtra("cert_fp", fp);
                     startActivity(intent);
                     finish();
+                } else if (trigger == null) {
+                    showPairScreen();
+                    showMode(Mode.UNREACHABLE);
                 } else {
-                    if (silent) {
-                        // Stored credentials are bad — show pairing screen
-                        getSharedPreferences(PREFS, MODE_PRIVATE)
-                                .edit().clear().apply();
-                        setContentView(R.layout.activity_pair);
-                        inputServerUrl = findViewById(R.id.inputServerUrl);
-                        inputApiKey = findViewById(R.id.inputApiKey);
-                        txtError = findViewById(R.id.txtError);
-                        btnConnect = findViewById(R.id.btnConnect);
-                        btnScanQr = findViewById(R.id.btnScanQr);
-                        btnScanQr.setOnClickListener(v -> startQrScan());
-                        btnConnect.setOnClickListener(v -> manualConnect());
-                    } else {
-                        showError(getString(R.string.connection_failed));
-                        btnConnect.setEnabled(true);
-                        btnScanQr.setEnabled(true);
-                        btnConnect.setText(R.string.connect);
-                    }
+                    setBusy(trigger, false);
+                    showError(getString(trigger == btnScanQr ? R.string.qr_connect_failed
+                            : trigger == btnRetry ? R.string.still_unreachable
+                            : R.string.connection_failed));
                 }
             });
         });
+    }
+
+    private void setBusy(MaterialButton trigger, boolean busy) {
+        for (MaterialButton b : new MaterialButton[]{btnScanQr, btnConnect, btnRetry, btnForget, btnToggleMode}) {
+            b.setEnabled(!busy);
+        }
+        if (busy) {
+            busyLabel = trigger.getText();
+            trigger.setText(R.string.connecting);
+            txtError.setVisibility(View.GONE);
+        } else {
+            trigger.setText(busyLabel);
+        }
+    }
+
+    private void confirmForget() {
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.disconnect_title)
+                .setMessage(R.string.disconnect_message)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.disconnect, (d, w) -> {
+                    getSharedPreferences(ServerLink.PREFS, MODE_PRIVATE).edit().clear().apply();
+                    WebStorage.getInstance().deleteAllData();
+                    savedUrls = Collections.emptyList();
+                    savedKey = "";
+                    savedFp = "";
+                    showMode(Mode.QR);
+                })
+                .show();
     }
 
     private void showError(String msg) {

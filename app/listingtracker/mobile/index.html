@@ -75,6 +75,42 @@ body {
 }
 .icon-btn.active { color: var(--gold); border-color: var(--gold); }
 
+/* Connection menu */
+.header-top { position: relative; }
+.conn-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% - 4px);
+  right: 0;
+  z-index: 200;
+  min-width: 220px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+  overflow: hidden;
+}
+.conn-menu.open { display: block; }
+.conn-menu .conn-info {
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text2);
+  border-bottom: 1px solid var(--border);
+  word-break: break-all;
+}
+.conn-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 13px 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.conn-menu button.danger { color: var(--red); }
+
 /* Filter chips */
 .filters {
   display: flex;
@@ -495,6 +531,12 @@ body {
         </select>
         <button class="icon-btn" id="favFilterBtn" onclick="toggleFavFilter()" title="Favorites only">&#9733;</button>
         <button class="icon-btn" onclick="refreshListings()" title="Refresh">&#x21bb;</button>
+        <button class="icon-btn" id="connMenuBtn" onclick="toggleConnMenu(event)" title="Connection">&#8942;</button>
+      </div>
+      <div class="conn-menu" id="connMenu">
+        <div class="conn-info" id="connInfo"></div>
+        <button onclick="reconnect()">Reconnect</button>
+        <button class="danger" onclick="disconnect()">Disconnect</button>
       </div>
     </div>
     <div class="filters" id="cityFilters"></div>
@@ -544,13 +586,13 @@ function loadCredentials() {
 // ------ API calls ------
 async function apiFetch(path, opts = {}) {
   const url = serverUrl.replace(/\/+$/, '') + path;
-  const sep = path.includes('?') ? '&' : '?';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), API_TIMEOUT);
   try {
-    const resp = await fetch(url + sep + 'key=' + encodeURIComponent(apiKey), {
+    const resp = await fetch(url, {
       signal: controller.signal,
       ...opts,
+      headers: { ...(opts.headers || {}), 'X-API-Key': apiKey },
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return await resp.json();
@@ -590,6 +632,37 @@ function showMainApp() {
   document.getElementById('mainApp').style.display = 'block';
   loadStats();
   loadListings();
+}
+
+// ------ Connection menu ------
+// Inside the Android app, window.AndroidApp hands these actions to the app, which owns the pairing.
+function toggleConnMenu(e) {
+  e.stopPropagation();
+  let host = serverUrl;
+  try { host = new URL(serverUrl).host; } catch(err) {}
+  document.getElementById('connInfo').textContent = 'Connected to ' + host;
+  document.getElementById('connMenu').classList.toggle('open');
+}
+document.addEventListener('click', () => document.getElementById('connMenu').classList.remove('open'));
+
+function reconnect() {
+  if (window.AndroidApp) { AndroidApp.reconnect(); return; }
+  refreshListings();
+}
+
+function disconnect() {
+  if (window.AndroidApp) { AndroidApp.disconnect(); return; }
+  if (!confirm('Disconnect from this server? You will need the QR code or API key to connect again.')) return;
+  try {
+    localStorage.removeItem('lt_server');
+    localStorage.removeItem('lt_key');
+  } catch(e) {}
+  serverUrl = '';
+  apiKey = '';
+  listings = [];
+  document.getElementById('apiKeyInput').value = '';
+  document.getElementById('mainApp').style.display = 'none';
+  document.getElementById('loginScreen').style.display = '';
 }
 
 // ------ Stats ------
@@ -1125,10 +1198,12 @@ function handleQrResult(raw) {
 }
 
 // ------ Init ------
-// Support auto-connect via URL params: ?key=API_KEY[&url=SERVER_URL]
+// Support auto-connect via #key=API_KEY (preferred: a fragment is never sent to the server)
+// or ?key=API_KEY[&url=SERVER_URL]
 const urlParams = new URLSearchParams(location.search);
-const paramKey = urlParams.get('key');
-const paramUrl = urlParams.get('url');
+const hashParams = new URLSearchParams(location.hash.slice(1));
+const paramKey = hashParams.get('key') || urlParams.get('key');
+const paramUrl = hashParams.get('url') || urlParams.get('url');
 if (paramKey) {
   apiKey = paramKey;
   serverUrl = paramUrl || location.origin;
