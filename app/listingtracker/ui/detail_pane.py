@@ -801,6 +801,15 @@ class DetailPane(QWidget):
             comp_tab = self._build_comparables_tab(listing, snap)
             self.tabs.addTab(comp_tab, "Comparables")
 
+        try:
+            from listingtracker import buildingsales
+            building = buildingsales.summary_for(listing, snap)
+        except Exception as e:  # the sales are extra: never let them stop the listing showing
+            logger.warning("Building sales unavailable for %s: %s", listing.url, e)
+            building = None
+        if building:
+            self.tabs.addTab(self._build_building_sales_tab(building), "Building Sales")
+
         if self._profile:
             self._commute_tab = CommuteTab(listing, self._profile)
             self._commute_tab.summary_ready.connect(self._show_commute_summary)
@@ -1614,6 +1623,79 @@ class DetailPane(QWidget):
             extras_grid.addWidget(vl, r, col + 1)
 
         self._offer_results_layout.addLayout(extras_grid)
+
+    def _build_building_sales_tab(self, b: dict) -> QWidget:
+        """What other units in this building sold for (from strata.ca), and how this price compares."""
+        w = QWidget()
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(4, 4, 4, 4)
+        sales = b.get("sales") or []
+        if not sales:
+            msg = QLabel(f"No sales on record in this building in the last 3 years "
+                         f"(read {b.get('checked') or 'never'}).")
+            msg.setStyleSheet("color: #888; font-size: 12px; padding: 20px;")
+            msg.setWordWrap(True)
+            outer.addWidget(msg)
+            outer.addStretch()
+            return w
+
+        def money(v):
+            return f"${v:,.0f}" if v else "—"
+
+        def pct(v):
+            return f"{v:+.1f}%" if v is not None else ""
+
+        lines = []
+        if b.get("median_price"):
+            lines.append(f"<b>{b['count_year']}</b> sold in the last 12 months · median "
+                         f"<b>{money(b['median_price'])}</b>"
+                         + (f" · <b>${b['median_ppsf']:,}</b>/sq ft" if b.get("median_ppsf") else "")
+                         + (f" · sold at <b>{b['sold_to_ask']:.1f}%</b> of asking" if b.get("sold_to_ask") else "")
+                         + f" <span style='color:#888'>({b['basis']})</span>")
+        if b.get("vs_building_pct") is not None:
+            colour = "#ef5350" if b["vs_building_pct"] > 5 else "#4caf50" if b["vs_building_pct"] < -5 else "#ffd54f"
+            lines.append(f"This listing: <b>${b['listing_ppsf']:,}</b>/sq ft, "
+                         f"<b style='color:{colour}'>{pct(b['vs_building_pct'])}</b> vs the building")
+        if b.get("alike_median"):
+            colour = "#ef5350" if (b.get("vs_alike_pct") or 0) > 5 else "#4caf50" if (b.get("vs_alike_pct") or 0) < -5 else "#ffd54f"
+            lines.append(f"Units like this one (same bedrooms, similar size): {b['alike_count']} sold, "
+                         f"recent median <b>{money(b['alike_median'])}</b>"
+                         + (f" · asking is <b style='color:{colour}'>{pct(b['vs_alike_pct'])}</b>"
+                            if b.get("vs_alike_pct") is not None else ""))
+        head = QLabel("<br>".join(lines))
+        head.setTextFormat(Qt.TextFormat.RichText)
+        head.setWordWrap(True)
+        head.setStyleSheet("color: #ddd; font-size: 12px; margin-bottom: 6px;")
+        outer.addWidget(head)
+
+        rows = []
+        for s in sales:
+            beds = f"{s.get('beds') or 0}{'+' + str(s['beds_plus']) if s.get('beds_plus') else ''}"
+            ask = s.get("list_price")
+            vs = f"{s['sold_price'] / ask * 100:.0f}%" if ask else ""
+            ppsf = f"${s['sold_price'] / s['sqft']:,.0f}" if s.get("sqft") else ""
+            style = " style='background:#1a3a1a'" if s.get("alike") else ""
+            rows.append(
+                f"<tr{style}><td>{escape(s['sold_date'])}</td><td>{escape(str(s['unit']))}</td>"
+                f"<td>{beds} bd · {s.get('baths') or '?'} ba</td><td align=right>{s.get('sqft') or ''}</td>"
+                f"<td align=right><b>{money(s['sold_price'])}</b></td><td align=right>{money(ask)}</td>"
+                f"<td align=right>{vs}</td><td align=right>{ppsf}</td></tr>")
+        table = QLabel(
+            "<table cellspacing=0 cellpadding=3 width='100%' style='font-size:12px;color:#ddd'>"
+            "<tr style='color:#81d4fa'><th align=left>Sold</th><th align=left>Unit</th><th align=left>Layout</th>"
+            "<th align=right>Sq ft</th><th align=right>Sold for</th><th align=right>Asked</th>"
+            "<th align=right>of ask</th><th align=right>$/sq ft</th></tr>" + "".join(rows) + "</table>")
+        table.setTextFormat(Qt.TextFormat.RichText)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(table)
+        outer.addWidget(scroll, 1)
+
+        note = QLabel(f"Green rows are units like this one. From strata.ca, read {b.get('checked') or '—'}.")
+        note.setStyleSheet("color: #888; font-size: 11px;")
+        outer.addWidget(note)
+        return w
 
     def _build_comparables_tab(self, listing: Listing, snap: Snapshot) -> QWidget:
         from listingtracker.db import (

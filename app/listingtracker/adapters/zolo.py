@@ -6,7 +6,7 @@ import re
 import logging
 from typing import Optional
 
-from listingtracker.adapters.base import SiteAdapter
+from listingtracker.adapters.base import UNIT_PATTERN, SiteAdapter
 from listingtracker.models import Status
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ class ZoloAdapter(SiteAdapter):
 
         result["unit"] = self._regex(html, r'"unitNumber"\s*:\s*"([^"]+)"')
         if not result["unit"]:
-            result["unit"] = self._regex(html, r'(?:Unit|Suite|#)\s*(\d+\w*)')
+            result["unit"] = self._regex(html, UNIT_PATTERN)
         result["building_name"] = self._regex(html, r'class="[^"]*building[^"]*"[^>]*>([^<]+)<')
         result["neighbourhood"] = self._regex(html, r'"neighborhood"\s*:\s*"([^"]+)"')
         result["mls_number"] = self._regex(html, r'MLS[®#:\s]*([A-Z]\d{7,})')

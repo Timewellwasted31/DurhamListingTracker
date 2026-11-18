@@ -8,7 +8,7 @@ import logging
 from collections import OrderedDict
 from typing import Optional
 
-from listingtracker.adapters.base import SiteAdapter
+from listingtracker.adapters.base import UNIT_PATTERN, SiteAdapter
 from listingtracker.models import Status
 
 logger = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ class WahiAdapter(SiteAdapter):
                 ld.get("address", {}).get("addressLocality", "")
                 if ld else self._rx(html, r'"addressLocality"\s*:\s*"([^"]+)"', "")
             )
-            result["unit"] = self._rx(html, r'(?:Unit|Suite|Apt|#)\s*(\d+\w*)')
+            result["unit"] = self._rx(html, UNIT_PATTERN)
             result["mls_number"] = self._rx(html, r'MLS[®#:\s]*([A-Z]\d{7,})')
             result["status"] = self._extract_status(html, errors)
             result["list_price"] = self._extract_price(html, ld, errors)

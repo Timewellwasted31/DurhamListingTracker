@@ -227,6 +227,13 @@ def fetch_listing(
         html = page.content()
         _increment_domain_count(listing.url)
 
+        landed = urlparse(page.url or "").netloc
+        if landed and not adapter.matches(landed):
+            # The site sent us elsewhere (wahi.com has redirected to another brokerage since
+            # Nov 13, 2026): that page is not this listing, so keep what's stored.
+            logger.warning("%s now opens %s; keeping the stored data", listing.url, landed)
+            return None, []
+
         if adapter.detect_blocked(html):
             logger.warning("BLOCKED on %s", listing.url)
             prev = get_latest_snapshot(listing.id)

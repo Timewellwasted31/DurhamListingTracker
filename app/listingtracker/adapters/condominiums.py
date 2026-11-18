@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Optional
 
-from listingtracker.adapters.base import SiteAdapter
+from listingtracker.adapters.base import UNIT_PATTERN, SiteAdapter
 from listingtracker.models import Status
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ class CondominiumsAdapter(SiteAdapter):
         if not result["city"]:
             errors.append("parse failed for condominiums.ca: city")
 
-        result["unit"] = self._rx(html, r'(?:Unit|Suite|#)\s*(\d+\w*)')
+        result["unit"] = self._rx(html, UNIT_PATTERN)
         result["building_name"] = self._rx(html, r'<h1[^>]*>([^<]+)</h1>')
         result["neighbourhood"] = self._rx(html, r'"neighborhood"\s*:\s*"([^"]+)"')
         result["mls_number"] = self._rx(html, r'MLS[®#:\s]*([A-Z]\d{7,})')

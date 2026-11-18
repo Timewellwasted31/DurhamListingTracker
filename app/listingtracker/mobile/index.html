@@ -350,6 +350,10 @@ body {
 .history-price { font-size: 15px; font-weight: 600; text-align: right; }
 .history-change { font-size: 12px; font-weight: 600; text-align: right; margin-top: 2px; }
 .down { color: var(--green); }
+.history-item.alike { border-color: var(--green); }
+.bsales-summary { font-size: 13px; line-height: 1.6; margin: -4px 0 10px; }
+.bsales-more { width: 100%; padding: 10px; margin-bottom: 6px; background: none; color: var(--accent);
+  border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
 .up { color: var(--red); }
 
 .forecast-card {
@@ -515,6 +519,46 @@ body {
   font-size: 13px;
 }
 
+/* Qualification */
+.badge.qualifies { background: rgba(76,175,80,.15); color: var(--green); }
+.badge.no-qualify { background: rgba(239,83,80,.15); color: var(--red); }
+.badge.pos { background: rgba(255,152,0,.15); color: var(--orange); }
+.filters.secondary { padding-top: 0; }
+.chip.yes.active { background: var(--green); border-color: var(--green); }
+.chip.no.active { background: var(--red); border-color: var(--red); }
+.afford-head { font-size: 16px; font-weight: 700; }
+.afford-head.yes { color: var(--green); }
+.afford-head.no { color: var(--red); }
+.afford-note { font-size: 12px; color: var(--text2); margin-top: 6px; line-height: 1.5; }
+
+/* The computer's long jobs (Recheck All, Auto-Search) */
+.job-bar {
+  margin: 12px 16px 0;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 13px;
+}
+.job-bar.ok { border-color: var(--green); }
+.job-bar.failed { border-color: var(--red); }
+.job-row { display: flex; align-items: center; gap: 8px; }
+.job-text { flex: 1; min-width: 0; }
+.job-title { font-weight: 600; }
+.job-detail { color: var(--text2); font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.job-bar button {
+  background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px; font-size: 12px; cursor: pointer; flex-shrink: 0;
+}
+.job-progress { height: 4px; background: var(--surface2); border-radius: 2px; margin-top: 8px; overflow: hidden; }
+.job-progress div { height: 100%; background: var(--accent); transition: width .3s; }
+.job-progress.indeterminate div { width: 30% !important; animation: slide 1.2s ease-in-out infinite; }
+@keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+.conn-menu .menu-label {
+  padding: 8px 14px 4px; font-size: 11px; color: var(--text2);
+  text-transform: uppercase; letter-spacing: .5px; border-top: 1px solid var(--border);
+}
+
 /* Pull to refresh indicator */
 .pull-indicator {
   text-align: center;
@@ -557,22 +601,31 @@ body {
           <option value="date">Newest</option>
           <option value="price">Price: Low</option>
           <option value="price_desc">Price: High</option>
+          <option value="monthly">Monthly cost</option>
           <option value="city">City</option>
         </select>
         <button class="icon-btn" id="favFilterBtn" onclick="toggleFavFilter()" title="Favorites only">&#9733;</button>
         <button class="icon-btn" onclick="refreshListings()" title="Refresh">&#x21bb;</button>
-        <button class="icon-btn" id="connMenuBtn" onclick="toggleConnMenu(event)" title="Connection">&#8942;</button>
+        <button class="icon-btn" id="connMenuBtn" onclick="toggleConnMenu(event)" title="Menu">&#8942;</button>
       </div>
       <div class="conn-menu" id="connMenu">
         <div class="conn-info" id="connInfo"></div>
+        <button onclick="startJob('recheck')">Recheck all listings</button>
+        <button onclick="startJob('search')">Search for new listings</button>
+        <button onclick="startJob('sales')">Read building sales</button>
+        <div class="menu-label">Buyer profile</div>
+        <div id="profileList"><button disabled>Loading...</button></div>
+        <div class="menu-label">Connection</div>
         <button onclick="reconnect()">Reconnect</button>
         <button id="updateBtn" onclick="AndroidApp.checkForUpdate()" hidden>Check for app update</button>
         <button class="danger" onclick="disconnect()">Disconnect</button>
       </div>
     </div>
     <div class="filters" id="cityFilters"></div>
+    <div class="filters secondary" id="qualFilters"></div>
   </div>
 
+  <div id="jobBar"></div>
   <div class="stats-bar" id="statsBar"></div>
   <div class="pull-indicator" id="pullIndicator">Pull down to refresh...</div>
   <div class="listings" id="listingsContainer">
@@ -600,7 +653,9 @@ const STATUS_LABELS = { FOR_SALE: 'For Sale', SOLD: 'Sold', SOLD_CONDITIONAL: 'S
 let serverUrl = '';
 let apiKey = '';
 let listings = [];  // every active listing, as the server sent it; filtering and sorting happen here
-const currentFilter = { city: null, favOnly: false, sort: 'date' };
+let buyer = {};    // the desktop's active buyer profile, for the qualification filter
+// qual: null (all), 'yes' (qualifies), 'no' (doesn't), 'pos' (power of sale)
+const currentFilter = { city: null, qual: null, favOnly: false, sort: 'date' };
 let currentDetailId = null;
 let currentGalleryIndex = 0;
 let detailData = null;
@@ -663,7 +718,8 @@ async function connect() {
   saveCredentials();
   $('loginScreen').style.display = 'none';
   $('mainApp').style.display = 'block';
-  setListings(data.listings);
+  setListings(data.listings, data.buyer);
+  pollJobs();
 }
 
 function showLogin(message) {
@@ -699,7 +755,33 @@ function toggleConnMenu(e) {
   $('connInfo').textContent = 'Connected to ' + host;
   // Only app versions that can update themselves have this
   $('updateBtn').hidden = !(window.AndroidApp && AndroidApp.checkForUpdate);
-  $('connMenu').classList.toggle('open');
+  if ($('connMenu').classList.toggle('open')) loadProfiles();
+}
+
+// ------ Buyer profiles ------
+// The profile sets the budget the "Qualifies" filter and the computer's Auto-Search use.
+async function loadProfiles() {
+  try {
+    renderProfiles(await apiFetch('/api/profiles'));
+  } catch(e) {
+    $('profileList').innerHTML = '<button disabled>Couldn\'t load profiles</button>';
+  }
+}
+
+function renderProfiles(p) {
+  const row = (name, label) => `<button data-name="${escHtml(name)}" onclick="event.stopPropagation(); chooseProfile(this)">${name === p.active ? '&#10003; ' : '&emsp;'}${escHtml(label)}</button>`;
+  $('profileList').innerHTML = p.profiles.map(n => row(n, n)).join('') + row('', 'No profile');
+}
+
+async function chooseProfile(el) {
+  $('profileList').innerHTML = '<button disabled>Switching...</button>';
+  try {
+    renderProfiles(await apiFetch('/api/profiles/active?name=' + encodeURIComponent(el.dataset.name), { method: 'POST' }));
+    $('connMenu').classList.remove('open');
+    loadListings(true);  // qualification follows the profile's finances
+  } catch(e) {
+    $('profileList').innerHTML = '<button disabled>Couldn\'t switch profiles</button>';
+  }
 }
 document.addEventListener('click', () => $('connMenu').classList.remove('open'));
 
@@ -719,30 +801,45 @@ function disconnect() {
 }
 
 // ------ Listings ------
-async function loadListings() {
+// quiet: keep the current cards on screen while reloading (after a job, or the refresh button)
+async function loadListings(quiet) {
   const container = $('listingsContainer');
-  container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading listings...</div>';
+  if (!quiet) container.innerHTML = '<div class="loading"><div class="spinner"></div> Loading listings...</div>';
   try {
-    setListings((await apiFetch('/api/listings')).listings);
+    const data = await apiFetch('/api/listings');
+    setListings(data.listings, data.buyer);
   } catch(e) {
     if (e.status === 401) { showLogin('This server no longer accepts the saved key. Pair again.'); return; }
-    container.innerHTML = errorState('Failed to load listings', 'loadListings()');
+    if (!quiet || !listings.length) container.innerHTML = errorState('Failed to load listings', 'loadListings()');
   }
 }
 
-function setListings(all) {
+function refreshListings() {
+  loadListings(true);
+  pollJobs();
+}
+
+function setListings(all, buyerInfo) {
   listings = all;
+  buyer = buyerInfo || {};
+  // A filter left pointing at a city or group that no longer has listings would show nothing
+  if (currentFilter.city && !listings.some(l => (l.city || 'Unknown') === currentFilter.city)) currentFilter.city = null;
+  if (!buyer.can_qualify && (currentFilter.qual === 'yes' || currentFilter.qual === 'no')) currentFilter.qual = null;
+  renderAll();
+}
+
+function renderAll() {
   renderStats();
-  renderCityChips();
+  renderChips();
   renderListings();
 }
 
 function renderStats() {
-  const prices = listings.map(l => l.price).filter(p => p > 10000);
+  const prices = visibleListings().map(l => l.price).filter(p => p > 10000);
   const avg = prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : 0;
   const thousands = p => prices.length ? '$' + Math.round(p / 1000) + 'k' : '-';
   $('statsBar').innerHTML = [
-    [listings.length, 'Listings'],
+    [visibleListings().length, 'Listings'],
     [`<span id="favCount">${countFavorites()}</span>`, 'Favorites'],
     [thousands(avg), 'Avg Price'],
     [thousands(Math.min(...prices)), 'Lowest'],
@@ -757,31 +854,59 @@ function countFavorites() {
   return listings.reduce((n, l) => n + (l.favorited ? 1 : 0), 0);
 }
 
-function renderCityChips() {
+const QUAL_TESTS = {
+  yes: l => l.qualifies === true,
+  no: l => l.qualifies === false,
+  pos: l => !!l.pos,
+};
+const cityOf = l => l.city || 'Unknown';
+const passesFav = l => !currentFilter.favOnly || l.favorited;
+const passesCity = l => !currentFilter.city || cityOf(l) === currentFilter.city;
+const passesQual = l => !currentFilter.qual || QUAL_TESTS[currentFilter.qual](l);
+
+// Each row's counts follow the other filters, so a chip's number is what tapping it shows
+function renderChips() {
   const counts = {};
-  for (const l of listings) {
-    const city = l.city || 'Unknown';
-    counts[city] = (counts[city] || 0) + 1;
-  }
-  const chip = (city, label) =>
+  for (const l of listings.filter(l => passesFav(l) && passesQual(l))) counts[cityOf(l)] = (counts[cityOf(l)] || 0) + 1;
+  if (currentFilter.city && !counts[currentFilter.city]) counts[currentFilter.city] = 0;  // keep it tappable
+  const cityChip = (city, label) =>
     `<div class="chip${city === currentFilter.city ? ' active' : ''}" data-city="${escHtml(city || '')}" onclick="filterCity(this)">${label}</div>`;
-  $('cityFilters').innerHTML = chip(null, 'All') + Object.entries(counts)
+  $('cityFilters').innerHTML = cityChip(null, 'All cities') + Object.entries(counts)
     .sort((a, b) => b[1] - a[1])
-    .map(([city, n]) => chip(city, `${escHtml(city)} (${n})`))
+    .map(([city, n]) => cityChip(city, `${escHtml(city)} (${n})`))
     .join('');
+
+  const pool = listings.filter(l => passesFav(l) && passesCity(l));
+  const n = key => pool.filter(QUAL_TESTS[key]).length;
+  const qualChip = (key, label, cls = '') =>
+    `<div class="chip ${cls}${key === currentFilter.qual ? ' active' : ''}" data-qual="${key || ''}" onclick="filterQual(this)">${label}</div>`;
+  const chips = [qualChip(null, 'Any budget')];
+  if (buyer.can_qualify) {
+    chips.push(qualChip('yes', `Qualifies (${n('yes')})`, 'yes'), qualChip('no', `Doesn't qualify (${n('no')})`, 'no'));
+  }
+  if (listings.some(QUAL_TESTS.pos)) chips.push(qualChip('pos', `Power of sale (${n('pos')})`));
+  $('qualFilters').innerHTML = chips.length > 1 ? chips.join('') : '';
+  $('qualFilters').style.display = chips.length > 1 ? '' : 'none';
 }
 
 const SORTS = {
   date: (a, b) => (b.date_added || '').localeCompare(a.date_added || ''),
   price: (a, b) => (a.price || Infinity) - (b.price || Infinity),
   price_desc: (a, b) => (b.price || 0) - (a.price || 0),
+  monthly: (a, b) => (a.monthly || Infinity) - (b.monthly || Infinity),
   city: (a, b) => (a.city || '').localeCompare(b.city || ''),
 };
 
 function visibleListings() {
   return listings
-    .filter(l => (!currentFilter.favOnly || l.favorited) && (!currentFilter.city || (l.city || 'Unknown') === currentFilter.city))
+    .filter(l => passesFav(l) && passesCity(l) && passesQual(l))
     .sort(SORTS[currentFilter.sort] || SORTS.date);
+}
+
+function qualBadge(l) {
+  if (l.qualifies === true) return '<span class="badge qualifies">Qualifies</span>';
+  if (l.qualifies === false) return '<span class="badge no-qualify">Doesn\'t qualify</span>';
+  return '';
 }
 
 function renderListings() {
@@ -794,7 +919,8 @@ function renderListings() {
 
   container.innerHTML = shown.map(l => {
     const st = statusInfo(l.status);
-    const meta = [l.beds && l.beds + ' bd', l.baths && l.baths + ' ba', l.sqft && l.sqft.toLocaleString() + ' sqft']
+    const meta = [l.beds && l.beds + ' bd', l.baths && l.baths + ' ba', l.sqft && l.sqft.toLocaleString() + ' sqft',
+                  l.monthly && formatPrice(l.monthly) + '/mo']
       .filter(Boolean).join(' &middot; ');
     const imgHtml = l.image_url
       ? `<img class="card-image" src="${escHtml(l.image_url)}" alt="" loading="lazy" decoding="async" onerror="this.outerHTML='<div class=\\'card-image placeholder\\'>&#x1F3E0;</div>'">`
@@ -812,6 +938,8 @@ function renderListings() {
           <div class="card-price ${st.sold ? 'sold' : ''}">${l.price ? formatPrice(l.price) : 'No price'}${boughtTag(l.bought, l.bought_est)}</div>
           <div class="card-badges">
             <span class="badge ${st.cls}">${st.label}</span>
+            ${qualBadge(l)}
+            ${l.pos ? '<span class="badge pos">Power of sale</span>' : ''}
             ${l.city ? `<span class="badge">${escHtml(l.city)}</span>` : ''}
             ${l.type ? `<span class="badge">${escHtml(l.type)}</span>` : ''}
           </div>
@@ -821,21 +949,32 @@ function renderListings() {
 }
 
 // ------ Filters ------
+// Each change starts the list from the top: left scrolled far down a list that just got much
+// shorter, the phone's WebView can show an empty screen until it is scrolled again.
+function applyFilters() {
+  renderAll();
+  window.scrollTo(0, 0);
+}
+
 function filterCity(el) {
   currentFilter.city = el.dataset.city || null;
-  document.querySelectorAll('.filters .chip').forEach(c => c.classList.toggle('active', c === el));
-  renderListings();
+  applyFilters();
+}
+
+function filterQual(el) {
+  currentFilter.qual = el.dataset.qual || null;
+  applyFilters();
 }
 
 function toggleFavFilter() {
   currentFilter.favOnly = !currentFilter.favOnly;
   $('favFilterBtn').classList.toggle('active', currentFilter.favOnly);
-  renderListings();
+  applyFilters();
 }
 
 function changeSort() {
   currentFilter.sort = $('sortSelect').value;
-  renderListings();
+  applyFilters();
 }
 
 // ------ Favorites ------
@@ -848,7 +987,7 @@ async function toggleFav(id) {
     // Touch only what changed, so the other cards (and their photos) are left alone
     const btn = $('fav-' + id);
     if (currentFilter.favOnly) {
-      renderListings();
+      renderAll();
     } else if (btn) {
       btn.classList.toggle('active', favorited);
       btn.innerHTML = favorited ? '&#9733;' : '&#9734;';
@@ -999,6 +1138,8 @@ function renderDetail() {
 
       <div class="info-grid" style="margin-top:16px">${infoHtml}</div>
 
+      ${renderAffordability(d.affordability)}
+      ${renderBuildingSales(d.building_sales)}
       ${peerHtml}
       ${forecastHtml}
       ${historyHtml}
@@ -1010,6 +1151,72 @@ function renderDetail() {
     </div>`;
 
   if (d.favorited) loadComparables(d.id);
+}
+
+// Whether the buyer qualifies at the asking price, as the desktop works it out (GDS/TDS at the
+// stress-test rate, with the active profile's finances)
+function renderAffordability(a) {
+  if (!a || (a.qualifies == null && !a.monthly)) return '';
+  let head = '';
+  if (a.deal_breakers) head = `<div class="afford-head no">Deal breaker: ${escHtml(a.deal_breakers[0])}</div>`;
+  else if (a.qualifies === true) head = '<div class="afford-head yes">&#10003; Qualifies</div>';
+  else if (a.qualifies === false) head = '<div class="afford-head no">&#10007; Doesn\'t qualify</div>';
+  const items = [
+    ['Monthly all-in', a.monthly && formatPrice(a.monthly) + '/mo'],
+    ['Max qualifying price', a.max_price && formatPrice(a.max_price)],
+    ['Your monthly target', a.monthly_target && formatPrice(a.monthly_target) + '/mo'],
+    ['Your monthly ceiling', a.monthly_ceiling && formatPrice(a.monthly_ceiling) + '/mo'],
+  ].filter(([, v]) => v);
+  const vsTarget = a.monthly && a.monthly_target
+    ? `${formatPrice(Math.abs(a.monthly - a.monthly_target))}/mo ${a.monthly > a.monthly_target ? 'over' : 'under'} your target. ` : '';
+  const more = (a.deal_breakers || []).slice(1).map(b => escHtml(b) + '. ').join('');
+  return `
+    <div class="section-title">Affordability</div>
+    ${head}
+    <div class="info-grid" style="margin-top:8px">${items.map(([label, value]) => `
+      <div class="info-item"><div class="info-label">${label}</div><div class="info-value">${value}</div></div>`).join('')}
+    </div>
+    <div class="afford-note">${more}${vsTarget}Monthly all-in is mortgage, taxes, fees, insurance, heat and hydro${a.profile ? `, using the &ldquo;${escHtml(a.profile)}&rdquo; profile on your computer` : ''}.</div>`;
+}
+
+// What other units in the building sold for (strata.ca, read by the computer), newest first.
+// Units like this one (same bedrooms, similar size) are outlined in green.
+const BSALES_SHOWN = 8;
+function renderBuildingSales(b) {
+  if (!b) return '';
+  const sales = b.sales || [];
+  if (!sales.length) return `<div class="section-title">Building Sales</div>
+    <div class="afford-note">No sales in this building in the last 3 years.</div>`;
+  const lines = [];
+  if (b.median_price) lines.push(`<b>${b.count_year}</b> sold in the last 12 months &middot; median <b>${formatPrice(b.median_price)}</b>` +
+    (b.median_ppsf ? ` &middot; <b>$${b.median_ppsf.toLocaleString()}</b>/sq ft` : '') +
+    (b.sold_to_ask ? ` &middot; <b>${b.sold_to_ask.toFixed(1)}%</b> of asking` : ''));
+  const signed = v => (v > 0 ? '+' : '') + v.toFixed(1) + '%';
+  const cls = v => v > 5 ? 'up' : v < -5 ? 'down' : '';
+  if (b.vs_building_pct != null) lines.push(`This listing: <b>$${b.listing_ppsf.toLocaleString()}</b>/sq ft, ` +
+    `<b class="${cls(b.vs_building_pct)}">${signed(b.vs_building_pct)}</b> vs the building`);
+  if (b.alike_median) lines.push(`Units like this one: ${b.alike_count} sold, median <b>${formatPrice(b.alike_median)}</b>` +
+    (b.vs_alike_pct != null ? ` &middot; asking is <b class="${cls(b.vs_alike_pct)}">${signed(b.vs_alike_pct)}</b>` : ''));
+  const row = (s, i) => {
+    const beds = `${s.beds || 0}${s.beds_plus ? '+' + s.beds_plus : ''} bd &middot; ${s.baths || '?'} ba` + (s.sqft ? ` &middot; ${s.sqft} sq ft` : '');
+    const ask = s.list_price ? `<div class="history-change">${Math.round(s.sold_price / s.list_price * 100)}% of ${formatPrice(s.list_price)}</div>` : '';
+    return `<div class="history-item${s.alike ? ' alike' : ''}"${i >= BSALES_SHOWN ? ' data-more hidden' : ''}>
+        <div>
+          <div class="history-date">${formatDate(s.sold_date)} &middot; Unit ${escHtml(String(s.unit))}</div>
+          <div class="history-note">${beds}</div>
+        </div>
+        <div>
+          <div class="history-price">${formatPrice(s.sold_price)}</div>
+          ${ask}
+        </div>
+      </div>`;
+  };
+  const more = sales.length > BSALES_SHOWN
+    ? `<button class="bsales-more" onclick="this.parentNode.querySelectorAll('[data-more]').forEach(e => e.hidden = false); this.remove()">Show all ${sales.length} sales</button>` : '';
+  return `<div class="section-title">Building Sales</div>
+    <div class="bsales-summary">${lines.join('<br>')}</div>
+    <div>${sales.map(row).join('')}${more}</div>
+    <div class="afford-note">From strata.ca${b.checked ? ', read ' + formatDate(b.checked) : ''}. Green outline: units like this one.</div>`;
 }
 
 // Asking prices as [date, price] pairs, one per change, oldest first; shown newest first
@@ -1201,6 +1408,117 @@ document.addEventListener('touchend', e => {
 });
 
 // ------ Helpers ------
+// ------ The computer's long jobs: Recheck All and Auto-Search ------
+// The desktop app runs them; the phone starts or stops them and follows their progress.
+const JOB_LABELS = { recheck: 'Recheck all', search: 'Search for new listings', sales: 'Building sales' };
+const JOB_RUNNING = { recheck: 'Computer is rechecking listings', search: 'Computer is searching for new listings',
+                      sales: 'Computer is reading building sales' };
+let jobTimer = null;
+let jobRunning = null;   // the job seen running at the last poll; its end reloads the listings
+let jobRequested = null; // a job asked for from here, so a refusal is shown too
+let jobRequestedAt = 0;
+const JOB_PICKUP_MS = 20000;  // the desktop answers within a second unless a dialog is open on it
+
+function jobSeen() { try { return localStorage.getItem('lt_job_seen') || ''; } catch(e) { return ''; } }
+function markJobSeen(at) { try { localStorage.setItem('lt_job_seen', at || ''); } catch(e) {} }
+
+function scheduleJobPoll(ms) {
+  clearTimeout(jobTimer);
+  jobTimer = setTimeout(pollJobs, ms);
+}
+
+async function pollJobs() {
+  clearTimeout(jobTimer);
+  try {
+    renderJob(await apiFetch('/api/operations'));
+  } catch(e) {
+    if (jobRunning) scheduleJobPoll(5000);  // keep following a running job through a dropout
+  }
+}
+
+async function startJob(job) {
+  $('connMenu').classList.remove('open');
+  if (job !== 'cancel') {
+    jobRequested = job;
+    jobRequestedAt = Date.now();
+  }
+  try {
+    renderJob(await apiFetch('/api/operations/' + job, { method: 'POST' }));
+    scheduleJobPoll(1500);  // the desktop picks the job up a moment later
+  } catch(e) {
+    jobRequested = null;
+    showJobNote(e.status === 503 ? 'Open Durham Listing Tracker on the computer first.'
+                                 : 'Couldn\'t reach the computer. Try again.', false, '');
+  }
+}
+
+function renderJob(s) {
+  if (s.running) {
+    jobRunning = s.running;
+    jobRequested = null;
+    const pct = s.total ? Math.min(100, Math.round(s.current / s.total * 100)) : 0;
+    $('jobBar').innerHTML = `
+      <div class="job-bar">
+        <div class="job-row">
+          <div class="job-text">
+            <div class="job-title">${JOB_RUNNING[s.running] || 'Working'}${s.total ? ` &middot; ${s.current}/${s.total}` : ''}</div>
+            <div class="job-detail">${escHtml(s.text || 'Starting...')}</div>
+          </div>
+          <button onclick="startJob('cancel')">Stop</button>
+        </div>
+        <div class="job-progress${s.total ? '' : ' indeterminate'}"><div style="width:${pct}%"></div></div>
+      </div>`;
+    scheduleJobPoll(3000);
+    return;
+  }
+
+  const justEnded = jobRunning;
+  jobRunning = null;
+  if (justEnded) loadListings(true);
+  const last = s.last;
+  if (jobRequested && !(last && last.job === jobRequested && last.at !== jobSeen())) {
+    if (Date.now() - jobRequestedAt < JOB_PICKUP_MS) {
+      scheduleJobPoll(1500);  // asked for, not started or refused yet
+      return;
+    }
+    jobRequested = null;
+    showJobNote('The computer didn\'t start it. A window may be open in the desktop app; close it and try again.', false, '');
+    return;
+  }
+  const watched = justEnded || jobRequested;
+  jobRequested = null;
+  if (last && last.at !== jobSeen() && (watched || jobSeen())) {
+    showJobNote(last.message, last.ok, last.at, last.job);
+  } else {
+    if (last && !jobSeen()) markJobSeen(last.at);  // first visit: don't bring up an old result
+    $('jobBar').innerHTML = '';
+  }
+}
+
+function showJobNote(message, ok, at, job) {
+  const title = job ? `${JOB_LABELS[job]}${ok ? ': done' : ': not done'}` : 'Not started';
+  $('jobBar').innerHTML = `
+    <div class="job-bar ${ok ? 'ok' : 'failed'}">
+      <div class="job-row">
+        <div class="job-text">
+          <div class="job-title">${ok ? '&#10003;' : '&#9888;'} ${escHtml(title)}</div>
+          <div class="job-detail" style="white-space:normal">${escHtml(message)}</div>
+        </div>
+        <button onclick="dismissJob('${escHtml(at)}')">OK</button>
+      </div>
+    </div>`;
+}
+
+function dismissJob(at) {
+  if (at) markJobSeen(at);
+  $('jobBar').innerHTML = '';
+}
+
+// A job started at the computer shows up when the app comes back to the front
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && apiKey && $('mainApp').style.display !== 'none') pollJobs();
+});
+
 function statusInfo(status) {
   const s = status || 'UNKNOWN';
   const sold = SOLD_STATUSES.has(s);

@@ -128,6 +128,27 @@ CREATE TABLE IF NOT EXISTS area_sales (
     sqft INTEGER
 ) WITHOUT ROWID;
 
+-- Sales of units in a building, from strata.ca's building history (read with the user's account).
+-- `building` is Strata's page path for it, e.g. "whitby/712-rossland-rd-e-connoisseur-condos".
+CREATE TABLE IF NOT EXISTS building_sales (
+    building TEXT NOT NULL,
+    unit TEXT NOT NULL,
+    sold_date TEXT NOT NULL,
+    sold_price REAL NOT NULL,
+    address TEXT,
+    list_price REAL,
+    list_date TEXT,
+    beds INTEGER,
+    beds_plus INTEGER,
+    baths INTEGER,
+    sqft INTEGER,
+    parking INTEGER,
+    fee REAL,
+    taxes REAL,
+    mls TEXT,
+    PRIMARY KEY (building, unit, sold_date)
+) WITHOUT ROWID;
+
 -- Small facts the app keeps about itself, e.g. which page-reading version filled the data
 CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,
@@ -913,6 +934,31 @@ def save_area_sales(sales: list[dict]) -> None:
 def get_area_sales() -> list[dict]:
     with _connect() as conn:
         return [dict(r) for r in conn.execute(f"SELECT {', '.join(AREA_SALE_FIELDS)} FROM area_sales")]
+
+
+BUILDING_SALE_FIELDS = ("building", "unit", "sold_date", "sold_price", "address", "list_price", "list_date",
+                        "beds", "beds_plus", "baths", "sqft", "parking", "fee", "taxes", "mls")
+
+
+def save_building_sales(sales: list[dict]) -> None:
+    if not sales:
+        return
+    with _connect() as conn:
+        conn.executemany(
+            f"INSERT OR REPLACE INTO building_sales ({', '.join(BUILDING_SALE_FIELDS)}) "
+            f"VALUES ({', '.join('?' * len(BUILDING_SALE_FIELDS))})",
+            [tuple(s.get(f) for f in BUILDING_SALE_FIELDS) for s in sales],
+        )
+        conn.commit()
+
+
+def get_building_sales(building: Optional[str] = None) -> list[dict]:
+    """Sales of one building (or all), newest first."""
+    where, args = ("WHERE building = ?", (building,)) if building else ("", ())
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(
+            f"SELECT {', '.join(BUILDING_SALE_FIELDS)} FROM building_sales {where} "
+            "ORDER BY sold_date DESC", args)]
 
 
 def fill_missing_property_type(listing_id: int, property_type: str) -> None:

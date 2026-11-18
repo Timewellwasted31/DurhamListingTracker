@@ -24,6 +24,12 @@ BLOCKED_MARKERS = [
 ]
 
 
+# A unit number in page text: "Unit 410", "Suite #12B", or "#410 - 712 Rossland". A bare "#" needs
+# the street number after it, so CSS colours such as #58595b or #202124 aren't read as units.
+UNIT_PATTERN = (r'(?:\b(?:Unit|Suite|Apt)\.?\s*#?\s*|#\s*(?=\d{1,4}[A-Za-z]?\s*[-–,]\s*\d))'
+                r'(\d{1,4}[A-Za-z]?)\b')
+
+
 # Free-text snapshot fields scraped with loose patterns, so they can pick up page code
 TEXT_FIELDS = (
     "parking", "locker", "balcony", "exposure", "broker", "fee_includes", "property_type",

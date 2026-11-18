@@ -121,13 +121,67 @@ def list_listings(_=Depends(verify_api_key)):
     pool = purchaseprice.sales_pool()
     listings = get_all_listings(active_only=True)
     guesser = purchaseprice.type_guesser(listings, snapshots)
+    cfg, profile = _buyer()
     cards = []
     for lst in listings:
         snap = snapshots.get(lst.id)
         bought = last_purchase(sales.get(lst.id, []), list_dates.get(lst.id))
         est = None if bought else purchaseprice.estimate(purchaseprice.home_for(lst, snap, guesser), pool)
-        cards.append(_summary(lst, snap, images.get(lst.id), bought, est))
-    return {"listings": cards}
+        card = _summary(lst, snap, images.get(lst.id), bought, est)
+        card.update(_compact(_money(snap, cfg)))
+        cards.append(card)
+    return {"listings": cards, "buyer": _buyer_summary(cfg, profile)}
+
+
+def _buyer():
+    """The finance settings and buyer profile the desktop is using (the active profile writes
+    its finances into the config, so both agree with what the desktop shows)."""
+    from listingtracker.config import config_to_finance, load_config
+    from listingtracker.profiles import get_active_profile_name, load_profile
+
+    name = get_active_profile_name()
+    return config_to_finance(load_config()), (load_profile(name) if name else None)
+
+
+def _buyer_summary(cfg, profile) -> dict:
+    return _compact({
+        "profile": profile.name if profile else None,
+        "can_qualify": cfg.annual_income > 0,  # without an income every home "doesn't qualify"
+        "monthly_target": (profile.monthly_allin_target or None) if profile else None,
+        "monthly_ceiling": profile.monthly_allin_ceiling if profile else None,
+        "price_ceiling": profile.price_ceiling if profile else None,
+    })
+
+
+def _money(snap, cfg) -> dict:
+    """Whether the buyer qualifies at the asking price, and the monthly all-in cost."""
+    from listingtracker.finance import monthly_carrying_cost, qualifies
+
+    if not snap or not snap.list_price:
+        return {}
+    args = (snap.list_price, snap.maintenance_fee or 0, snap.taxes_annual or 0, snap.fee_includes or "", cfg)
+    return {
+        "qualifies": qualifies(*args) if cfg.annual_income > 0 else None,
+        "monthly": round(monthly_carrying_cost(*args)),
+        "pos": True if snap.power_of_sale else None,
+    }
+
+
+def _affordability(snap, cfg, profile) -> dict | None:
+    """The phone's version of the desktop's qualification badge and budget figures."""
+    from listingtracker.finance import max_qualifying_price
+    from listingtracker.search import check_deal_breakers
+
+    if not snap:
+        return None
+    out = _money(snap, cfg)
+    if cfg.annual_income > 0:
+        out["max_price"] = round(max_qualifying_price(
+            snap.maintenance_fee or 0, snap.taxes_annual or 0, snap.fee_includes or "", cfg), -3)
+    if profile:
+        out["deal_breakers"] = check_deal_breakers(snap, profile) or None
+    out.update(_buyer_summary(cfg, profile))
+    return _compact(out) or None
 
 
 def _summary(lst, snap, image_url, bought, estimate=None) -> dict:
@@ -188,9 +242,21 @@ def get_listing(listing_id: int, _=Depends(verify_api_key)):
         "past_sales": [list(s) for s in prices.past_sales] or None,
         "bought": list(prices.bought) if prices.bought else None,
         "bought_estimate": estimate.to_dict() if estimate else None,
+        "affordability": _affordability(snap, *_buyer()),
+        "building_sales": _building_sales(lst, snap),
         "images": [img["url"] for img in get_listing_images(listing_id)],
         "peer_stats": peers,
     })
+
+
+def _building_sales(lst, snap) -> Optional[dict]:
+    """What other units in the building sold for (strata.ca), or None if it hasn't been read."""
+    from listingtracker import buildingsales
+    try:
+        return buildingsales.summary_for(lst, snap)
+    except Exception as e:  # extra information: never let it break the listing
+        logger.warning("Building sales unavailable for %s: %s", lst.url, e)
+        return None
 
 
 _SNAPSHOT_INTERNAL = ("id", "listing_id", "raw_html_path", "parse_errors")
@@ -260,6 +326,69 @@ def scan_comparables(_=Depends(verify_api_key)):
         return {"message": "No favorites to scan", "count": 0}
     total, _ = scan(favorites)
     return {"message": f"Found {total} comparables across {len(favorites)} favorites", "count": total}
+
+
+# ---------------------------------------------------------------------------
+# The desktop's long jobs: Recheck All and Auto-Search
+# ---------------------------------------------------------------------------
+
+@app.get("/api/operations")
+def operations_status(_=Depends(verify_api_key)):
+    """What the computer is doing: the running job and its progress, and how the last one ended."""
+    from listingtracker.operations import operations
+    return operations.status()
+
+
+@app.post("/api/operations/{job}")
+def start_operation(job: str, _=Depends(verify_api_key)):
+    """Start "recheck" or "search", or "cancel" the running one. The desktop window runs it,
+    so this needs the desktop app open; `--api` alone can't."""
+    from listingtracker.operations import JOBS, operations
+    if job not in (*JOBS, "cancel"):
+        raise HTTPException(status_code=404, detail="Unknown job")
+    if not operations.available:
+        raise HTTPException(status_code=503, detail="The desktop app isn't open on the computer")
+    operations.request(job)
+    return operations.status()
+
+
+# ---------------------------------------------------------------------------
+# Buyer profiles
+# ---------------------------------------------------------------------------
+
+PROFILE_SWITCH_WAIT = 5.0  # seconds to wait for the desktop window to apply a switch
+
+
+@app.get("/api/profiles")
+def get_profiles(_=Depends(verify_api_key)):
+    from listingtracker.profiles import get_active_profile_name, list_profiles
+    return {"profiles": list_profiles(), "active": get_active_profile_name()}
+
+
+@app.post("/api/profiles/active")
+def set_profile(name: str = "", _=Depends(verify_api_key)):
+    """Switch the buyer profile ("" for none). The desktop window does it when it's open, as if
+    picked in its profile menu, so the two never disagree; otherwise it's applied here."""
+    import time
+    from listingtracker.config import load_config, save_config
+    from listingtracker.operations import operations
+    from listingtracker.profiles import get_active_profile_name, list_profiles, load_profile, set_active_profile_name
+
+    if name and name not in list_profiles():
+        raise HTTPException(status_code=404, detail="No such profile")
+    if operations.available:
+        operations.request_profile(name)
+        deadline = time.monotonic() + PROFILE_SWITCH_WAIT
+        while get_active_profile_name() != name and time.monotonic() < deadline:
+            time.sleep(0.1)
+    else:
+        set_active_profile_name(name)
+        profile = load_profile(name) if name else None
+        if profile:
+            config = load_config()
+            config.update(profile.to_finance_dict())
+            save_config(config)
+    return get_profiles()
 
 
 # ---------------------------------------------------------------------------

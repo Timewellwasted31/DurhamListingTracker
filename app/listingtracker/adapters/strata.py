@@ -13,7 +13,7 @@ import logging
 from typing import Optional
 from urllib.parse import urlparse
 
-from listingtracker.adapters.base import SiteAdapter
+from listingtracker.adapters.base import UNIT_PATTERN, SiteAdapter
 from listingtracker.models import Status
 
 logger = logging.getLogger(__name__)
@@ -572,7 +572,7 @@ class StrataAdapter(SiteAdapter):
         m = re.search(r'"unitNumber"\s*:\s*"([^"]+)"', html)
         if m:
             return m.group(1).strip()
-        m = re.search(r'(?:Unit|Suite|Apt|#)\s*(\d+\w*)', html, re.IGNORECASE)
+        m = re.search(UNIT_PATTERN, html, re.IGNORECASE)
         return m.group(1).strip() if m else None
 
     def _maint_fee_fallback(self, html: str) -> Optional[float]:

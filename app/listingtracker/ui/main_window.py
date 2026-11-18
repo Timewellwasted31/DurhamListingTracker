@@ -43,6 +43,7 @@ from listingtracker.profiles import (
 from listingtracker.search import classify_listing, build_search_urls, ALL_SEARCH_SITES
 from listingtracker.valuescore import compute_value_metrics
 from listingtracker import areanews
+from listingtracker.operations import PROFILE_PREFIX, operations
 from listingtracker.crossref import (
     build_cross_ref_results, CrossRefResult,
     merge_from_cross_ref, build_enrichment_search_urls,
@@ -387,6 +388,44 @@ class FetchWorker(QObject):
             self.error.emit(str(e))
 
 
+class SalesWorker(QObject):
+    """Reads past sales of the tracked buildings from strata.ca (see buildingsales)."""
+    progress = Signal(int, int, str)
+    finished = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        from listingtracker import buildingsales
+        try:
+            self.finished.emit(buildingsales.refresh(
+                progress=lambda i, total, name: self.progress.emit(i, total, name),
+                cancel=lambda: self._cancelled))
+        except Exception as e:
+            logger.error("Building sales failed: %s", e, exc_info=True)
+            self.error.emit(str(e))
+
+
+class SignInWorker(QObject):
+    """Keeps the strata.ca sign-in window open until the user closes it."""
+    finished = Signal(str)
+
+    def run(self):
+        from listingtracker import buildingsales
+        try:
+            buildingsales.open_sign_in()
+            self.finished.emit("")
+        except Exception as e:
+            logger.error("Strata sign-in window failed: %s", e, exc_info=True)
+            self.finished.emit(str(e))
+
+
 class SearchWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(list)
@@ -531,6 +570,7 @@ class _DownloadWorker(QObject):
 
 class MainWindow(QMainWindow):
     _area_news_ready = Signal(int, object)  # listing id, AreaNews (None if the lookup crashed)
+    _phone_job = Signal(str)  # "recheck", "search" or "cancel", asked for by the phone server
 
     def __init__(self):
         super().__init__()
@@ -544,6 +584,8 @@ class MainWindow(QMainWindow):
         self._search_thread: Optional[QThread] = None
         self._enrich_thread: Optional[QThread] = None
         self._history_thread: Optional[QThread] = None
+        self._sales_thread: Optional[QThread] = None
+        self._sign_in_thread: Optional[QThread] = None
         self._research_listing_id: Optional[int] = None
         self._research_pending: set[str] = set()  # of "news", "sites", "history"
         self._area_news_ready.connect(self._on_area_news)
@@ -554,6 +596,7 @@ class MainWindow(QMainWindow):
         self._cross_ref_index: dict[int, CrossRefResult] = {}
         self._op_start_time: float = 0.0
         self._op_progress_text: str = ""
+        self._search_added = 0  # new listings the running Auto-Search added
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._update_elapsed)
@@ -566,6 +609,10 @@ class MainWindow(QMainWindow):
         self._load_listings()
         if not list_profiles():
             QTimer.singleShot(0, self._run_setup_wizard)
+
+        # The phone server runs on its own thread; emitting the signal queues the job to this one
+        self._phone_job.connect(self._on_phone_job)
+        operations.attach(self._phone_job.emit)
 
         QTimer.singleShot(3000, self._check_for_updates)
 
@@ -638,6 +685,13 @@ class MainWindow(QMainWindow):
         self.search_btn.setObjectName("searchBtn")
         self.search_btn.clicked.connect(self._auto_search)
         tb_layout.addWidget(self.search_btn)
+
+        self.sales_btn = QPushButton("Building Sales")
+        self.sales_btn.setToolTip("Read what units in your listings' buildings sold for, from strata.ca "
+                                  "with your account. Slow on purpose: up to 25 buildings a run, "
+                                  "each building at most once a week.")
+        self.sales_btn.clicked.connect(lambda: self._read_building_sales())
+        tb_layout.addWidget(self.sales_btn)
 
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setStyleSheet(
@@ -885,6 +939,11 @@ class MainWindow(QMainWindow):
             self.profile_combo.addItem(name)
         self.profile_combo.blockSignals(False)
 
+    def _set_active_profile_name(self, name: str):
+        set_active_profile_name(name)
+        # self.config is saved whole later on; without this it would put the old name back
+        self.config["active_profile"] = name
+
     def _load_active_profile(self):
         self._refresh_profile_combo()
         active_name = get_active_profile_name()
@@ -902,7 +961,7 @@ class MainWindow(QMainWindow):
     def _on_profile_changed(self, name: str):
         if name == "(No Profile)" or not name:
             self._active_profile = None
-            set_active_profile_name("")
+            self._set_active_profile_name("")
             self.detail_pane.set_profile(None)
             self._update_profile_summary()
             self._populate_list()
@@ -910,7 +969,7 @@ class MainWindow(QMainWindow):
         profile = load_profile(name)
         if profile:
             self._active_profile = profile
-            set_active_profile_name(name)
+            self._set_active_profile_name(name)
             self._apply_profile(profile)
         else:
             logger.warning("Could not load profile: %s", name)
@@ -1074,7 +1133,7 @@ class MainWindow(QMainWindow):
                 delete_profile(old_name)
             save_profile(profile)
             self._active_profile = profile
-            set_active_profile_name(profile.name)
+            self._set_active_profile_name(profile.name)
             self._refresh_profile_combo()
             idx = self.profile_combo.findText(profile.name)
             if idx >= 0:
@@ -1093,7 +1152,7 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             delete_profile(name)
             self._active_profile = None
-            set_active_profile_name("")
+            self._set_active_profile_name("")
             self._refresh_profile_combo()
             self.profile_combo.blockSignals(True)
             self.profile_combo.setCurrentIndex(0)
@@ -1402,6 +1461,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_worker') and self._fetch_thread and self._fetch_thread.isRunning():
             self._worker.cancel()
             cancelled = True
+        if self._sales_thread and self._sales_thread.isRunning():
+            self._sales_worker.cancel()
+            cancelled = True
         if cancelled:
             self.statusBar().showMessage("Cancelling...", 3000)
 
@@ -1425,9 +1487,54 @@ class MainWindow(QMainWindow):
         self._elapsed_timer.stop()
         self.recheck_btn.setEnabled(True)
         self.search_btn.setEnabled(True)
+        self.sales_btn.setEnabled(True)
         self.cancel_btn.setVisible(False)
         self.progress_bar.setVisible(False)
         self.progress_label.setVisible(False)
+        if not self._busy() and operations.status()["running"]:
+            operations.finished("Stopped")
+
+    def _busy(self) -> bool:
+        return any(t is not None and t.isRunning()
+                   for t in (self._fetch_thread, self._search_thread, self._sales_thread))
+
+    # --- Jobs asked for from the phone ---
+
+    def _on_phone_job(self, job: str):
+        """Recheck All or Auto-Search for the phone: the same jobs as the buttons, minus the
+        dialogs, since nobody may be at the computer. Refusals are reported back to the phone."""
+        if job.startswith(PROFILE_PREFIX):
+            # Through the profile menu, so the window applies it exactly as a click would
+            idx = self.profile_combo.findText(job[len(PROFILE_PREFIX):] or "(No Profile)")
+            if idx >= 0:
+                self.profile_combo.setCurrentIndex(idx)
+            return
+        if job == "cancel":
+            self._cancel_operation()
+            return
+        if self._busy():
+            operations.refused(job, "The computer is already checking or searching.")
+            return
+        if job == "recheck":
+            if not get_all_listings(active_only=True):
+                operations.refused(job, "There are no active listings to check.")
+                return
+            self.statusBar().showMessage("Recheck All started from your phone", 5000)
+            self._recheck_all()
+        elif job == "search":
+            profile = self._active_profile
+            if not profile:
+                operations.refused(job, "Choose a buyer profile on the computer first: "
+                                        "the search uses its cities and budget.")
+                return
+            # The sites last picked at the computer (none picked = every site)
+            if not build_search_urls(profile, sites=profile.search_sites):
+                operations.refused(job, "The buyer profile doesn't give any searches to run.")
+                return
+            self.statusBar().showMessage("Auto-Search started from your phone", 5000)
+            self._start_search(profile.search_sites)
+        elif job == "sales":
+            self._read_building_sales(from_phone=True)
 
     def _recheck_all(self):
         if self._fetch_thread and self._fetch_thread.isRunning():
@@ -1460,8 +1567,112 @@ class MainWindow(QMainWindow):
         self._fetch_thread.finished.connect(self._reset_ui_after_operation)
 
         self._fetch_thread.start()
+        operations.started("recheck", len(listings))
+
+    # --- Building sales (strata.ca) ---
+
+    def _read_building_sales(self, from_phone: bool = False):
+        from listingtracker import buildingsales
+        if self._busy():
+            if not from_phone:
+                QMessageBox.information(self, "Busy", "Wait for the current check or search to finish.")
+            return
+        if self._sign_in_thread and self._sign_in_thread.isRunning():
+            if from_phone:
+                operations.refused("sales", "The strata.ca sign-in window is open on the computer.")
+            return
+        if buildingsales.needs_sign_in():
+            if from_phone:
+                operations.refused("sales", "Sign in to strata.ca on the computer first "
+                                            "(Building Sales button).")
+                return
+            answer = QMessageBox.question(
+                self, "Sign in to strata.ca",
+                "Building sales come from strata.ca's building pages, which show sold prices only to "
+                "signed-in members.\n\nOpen a browser window to sign in now? Close the window when "
+                "you're signed in, then press Building Sales again.")
+            if answer == QMessageBox.StandardButton.Yes:
+                self._open_strata_sign_in()
+            return
+        until = buildingsales.paused_until()
+        if until:
+            msg = (f"strata.ca pushed back on the last run, so reading is paused until "
+                   f"{until:%b %d %H:%M} to protect your account.")
+            if from_phone:
+                operations.refused("sales", msg)
+            else:
+                QMessageBox.information(self, "Paused", msg)
+            return
+
+        self.recheck_btn.setEnabled(False)
+        self.search_btn.setEnabled(False)
+        self.sales_btn.setEnabled(False)
+        self.cancel_btn.setVisible(True)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self._start_elapsed()
+        self._op_progress_text = "Reading building sales (slowly, to protect your strata.ca account)"
+        self.progress_label.setText(self._op_progress_text)
+        self.progress_label.setVisible(True)
+
+        self._sales_thread = QThread()
+        self._sales_worker = SalesWorker()
+        self._sales_worker.moveToThread(self._sales_thread)
+        self._sales_thread.started.connect(self._sales_worker.run)
+        self._sales_worker.progress.connect(self._on_sales_progress)
+        self._sales_worker.finished.connect(self._on_sales_finished)
+        self._sales_worker.error.connect(self._on_sales_error)
+        self._sales_worker.finished.connect(self._sales_thread.quit)
+        self._sales_worker.error.connect(self._sales_thread.quit)
+        self._sales_thread.finished.connect(self._reset_ui_after_operation)
+        self._sales_thread.start()
+        operations.started("sales")
+
+    def _open_strata_sign_in(self):
+        self._sign_in_thread = QThread()
+        self._sign_in_worker = SignInWorker()
+        self._sign_in_worker.moveToThread(self._sign_in_thread)
+        self._sign_in_thread.started.connect(self._sign_in_worker.run)
+        self._sign_in_worker.finished.connect(self._on_sign_in_closed)
+        self._sign_in_worker.finished.connect(self._sign_in_thread.quit)
+        self._sign_in_thread.start()
+        self.statusBar().showMessage("Sign in to strata.ca in the window that opened, then close it.")
+
+    def _on_sign_in_closed(self, error: str):
+        if error:
+            QMessageBox.warning(self, "Sign-in window", f"The sign-in window couldn't open:\n{error}")
+        else:
+            self.statusBar().showMessage("strata.ca window closed. Press Building Sales to read sales.", 8000)
+
+    def _on_sales_progress(self, current: int, total: int, name: str):
+        operations.progress(current + 1, total, name)
+        self.progress_bar.setRange(0, max(total, 1))
+        self.progress_bar.setValue(current)
+        if name:
+            self._op_progress_text = f"Building sales {current + 1}/{total}: {name}"
+            self.progress_label.setText(f"{self._op_progress_text}  [{self._format_elapsed()}]")
+
+    def _on_sales_finished(self, result: dict):
+        stopped = result.get("stopped")
+        n, sales = result.get("buildings", 0), result.get("sales", 0)
+        msg = (f"{sales} sales read from {n} building{'s' if n != 1 else ''}" if n
+               else "No buildings were due: each is read at most once a week")
+        if stopped:
+            msg = f"{stopped}. {msg}" if n else stopped
+        operations.finished(msg, ok=not stopped or stopped == "Stopped")
+        self.statusBar().showMessage(msg, 15000)
+        if stopped and stopped != "Stopped":
+            QMessageBox.information(self, "Building sales", msg)
+        row = self.listing_list.currentRow()
+        if row >= 0:
+            self._on_listing_selected(row)  # show the new sales in the open listing
+
+    def _on_sales_error(self, error: str):
+        operations.finished(f"Building sales failed: {error}", ok=False)
+        self.statusBar().showMessage(f"Building sales failed: {error}", 10000)
 
     def _on_fetch_progress(self, current: int, total: int, address: str):
+        operations.progress(current + 1, total, address)
         if total != self.progress_bar.maximum():
             self.progress_bar.setMaximum(max(total, 1))
         self.progress_bar.setValue(current + 1)
@@ -1491,6 +1702,12 @@ class MainWindow(QMainWindow):
         if removed:
             msg += f", {removed} bad listings removed"
         self.statusBar().showMessage(msg, 15000)
+        phone_msg = f"{len(snapshots)} checked, {len(changes)} change{'s' if len(changes) != 1 else ''}"
+        if operations.status()["running"] == "search":
+            phone_msg = f"{self._search_added} new listing{'s' if self._search_added != 1 else ''} added; {phone_msg}"
+        if getattr(self._worker, "_cancelled", False):
+            phone_msg = f"Stopped early: {phone_msg}"
+        operations.finished(f"{phone_msg} ({elapsed})")
 
         self._show_changes(changes)
         self._refresh_list_no_cleanup()
@@ -1501,6 +1718,7 @@ class MainWindow(QMainWindow):
         self.recheck_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.progress_label.setVisible(False)
+        operations.finished(f"The check stopped with an error: {error}", ok=False)
         QMessageBox.warning(self, "Fetch Error", f"Error during fetch:\n{error}")
 
     def _show_changes(self, changes: list[Change]):
@@ -1637,8 +1855,10 @@ class MainWindow(QMainWindow):
         self._search_thread.finished.connect(self._reset_ui_after_operation)
 
         self._search_thread.start()
+        operations.started("search", len(urls))
 
     def _on_search_progress(self, current: int, total: int, description: str):
+        operations.progress(current + 1, total, description)
         if total != self.progress_bar.maximum():
             self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current + 1)
@@ -1671,7 +1891,9 @@ class MainWindow(QMainWindow):
         already = len(normalized) - len(new_urls)
         added = len(new_listings)
 
+        self._search_added = added
         if added > 0:
+            operations.progress(0, added, f"Found {added} new listings; getting their details")
             elapsed = self._format_elapsed()
             self.statusBar().showMessage(
                 f"Found {added} new listings in {elapsed} — now fetching details...", 10000
@@ -1688,6 +1910,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Search done — no new listings ({already} already tracked)  [{elapsed}]", 15000
             )
+            operations.finished(f"No new listings; {already} found were already tracked ({elapsed})")
 
     def _fetch_new_listings(self, listings, from_auto_search: bool = False):
         if self._fetch_thread and self._fetch_thread.isRunning():
@@ -1696,6 +1919,9 @@ class MainWindow(QMainWindow):
             )
             self.progress_bar.setVisible(False)
             self.progress_label.setVisible(False)
+            if from_auto_search:
+                operations.finished(f"{len(listings)} new listings added; "
+                                    "they'll be checked by the next Recheck All")
             return
 
         self.recheck_btn.setEnabled(False)
@@ -1729,6 +1955,7 @@ class MainWindow(QMainWindow):
         self.search_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.progress_label.setVisible(False)
+        operations.finished(f"The search stopped with an error: {error}", ok=False)
         QMessageBox.warning(self, "Search Error", f"Error during auto-search:\n{error}")
 
     # --- Settings ---
@@ -2143,6 +2370,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up worker threads on window close."""
+        operations.attach(None)
         for thread_attr, worker_attr in [
             ("_fetch_thread", "_worker"),
             ("_search_thread", "_search_worker"),

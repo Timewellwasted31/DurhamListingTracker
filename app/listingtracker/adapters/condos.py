@@ -6,7 +6,7 @@ import re
 import logging
 from typing import Optional
 
-from listingtracker.adapters.base import SiteAdapter
+from listingtracker.adapters.base import UNIT_PATTERN, SiteAdapter
 from listingtracker.models import Status
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ class CondosAdapter(SiteAdapter):
         result["unit"] = self._extract(
             html, errors, None,
             r'"unitNumber"\s*:\s*"([^"]+)"',
-            r'(?:Unit|Suite|#)\s*(\d+\w*)',
+            UNIT_PATTERN,
         )
         result["building_name"] = self._extract(
             html, errors, None,
