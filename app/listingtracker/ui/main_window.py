@@ -412,20 +412,6 @@ class SalesWorker(QObject):
             self.error.emit(str(e))
 
 
-class SignInWorker(QObject):
-    """Keeps the strata.ca sign-in window open until the user closes it."""
-    finished = Signal(str)
-
-    def run(self):
-        from listingtracker import buildingsales
-        try:
-            buildingsales.open_sign_in()
-            self.finished.emit("")
-        except Exception as e:
-            logger.error("Strata sign-in window failed: %s", e, exc_info=True)
-            self.finished.emit(str(e))
-
-
 class SearchWorker(QObject):
     progress = Signal(int, int, str)
     finished = Signal(list)
@@ -471,7 +457,7 @@ class HistoryFetchWorker(QObject):
             from patchright.sync_api import sync_playwright
             from listingtracker.fetcher import (
                 get_adapter_for_url, fetch_listing, _clean_browser_locks,
-                _random_viewport,
+                open_browser, close_browser,
             )
             from listingtracker.db import get_snapshots_for_listing
 
@@ -483,16 +469,8 @@ class HistoryFetchWorker(QObject):
             _clean_browser_locks()
 
             with sync_playwright() as p:
-                browser = p.chromium.launch(
-                    headless=not self.show_browser,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                    ],
-                )
-                vw, vh = _random_viewport()
-                context = browser.new_context(viewport={"width": vw, "height": vh})
+                urls = [self.listing.url]
+                browser, context, _ = open_browser(p, self.show_browser, urls)
                 page = context.new_page()
 
                 snap, _ = fetch_listing(
@@ -500,8 +478,7 @@ class HistoryFetchWorker(QObject):
                 )
 
                 page.close()
-                context.close()
-                browser.close()
+                close_browser(browser, context, urls)
 
             all_snaps = get_snapshots_for_listing(self.listing.id)
             self.finished.emit(self.listing.id, len(all_snaps))
@@ -1629,20 +1606,16 @@ class MainWindow(QMainWindow):
         operations.started("sales")
 
     def _open_strata_sign_in(self):
-        self._sign_in_thread = QThread()
-        self._sign_in_worker = SignInWorker()
-        self._sign_in_worker.moveToThread(self._sign_in_thread)
-        self._sign_in_thread.started.connect(self._sign_in_worker.run)
-        self._sign_in_worker.finished.connect(self._on_sign_in_closed)
-        self._sign_in_worker.finished.connect(self._sign_in_thread.quit)
-        self._sign_in_thread.start()
+        from listingtracker.ui.site_accounts import start_sign_in
+        self._sign_in_thread, self._sign_in_worker = start_sign_in("strata", self._on_sign_in_closed)
         self.statusBar().showMessage("Sign in to strata.ca in the window that opened, then close it.")
 
-    def _on_sign_in_closed(self, error: str):
-        if error:
-            QMessageBox.warning(self, "Sign-in window", f"The sign-in window couldn't open:\n{error}")
+    def _on_sign_in_closed(self, key: str, error: str):
+        from listingtracker.ui.site_accounts import confirm_signed_in
+        if confirm_signed_in(self, key, error):
+            self.statusBar().showMessage("Signed in to strata.ca. Press Building Sales to read sales.", 8000)
         else:
-            self.statusBar().showMessage("strata.ca window closed. Press Building Sales to read sales.", 8000)
+            self.statusBar().clearMessage()
 
     def _on_sales_progress(self, current: int, total: int, name: str):
         operations.progress(current + 1, total, name)

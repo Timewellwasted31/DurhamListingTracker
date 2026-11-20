@@ -16,23 +16,19 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import random
 import re
 import statistics
 import time
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Callable, Iterable, Optional
 from urllib.parse import urlparse
 
-from listingtracker.paths import BROWSER_PROFILE_DIR
+from listingtracker import siteaccounts
 
 logger = logging.getLogger(__name__)
 
-STRATA_PROFILE_DIR = BROWSER_PROFILE_DIR / "strata-opera"
 SIGN_IN_URL = "https://strata.ca/"
-LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"]
 
 RECHECK_DAYS = 7
 MAX_BUILDINGS_PER_RUN = 25
@@ -45,7 +41,6 @@ SHOWN_MONTHS = 36          # how far back the app shows a building's sales
 
 STATE_CHECKED = "building_sales_checked:"   # + building -> ISO date it was last read
 STATE_PAUSED = "building_sales_paused_until"
-STATE_SIGNED_OUT = "building_sales_signed_out"
 
 
 class StopRun(Exception):
@@ -133,61 +128,7 @@ _CHALLENGE = re.compile(r"just a moment|checking your browser|access denied|are 
                         re.IGNORECASE)
 
 
-# --- The browser -----------------------------------------------------------------------------
-
-def opera_gx() -> Optional[Path]:
-    """The newest installed Opera GX browser (not its launcher, which hands off and exits).
-
-    The user's own browser, not the test build the other fetches use: Google refuses its sign-in in
-    a test build ("Error 400"), and an everyday browser is less likely to get the account flagged.
-    It runs with its own profile in the app's folder, never the user's Opera profile."""
-    root = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Opera GX"
-    versions = [d for d in root.glob("*") if re.fullmatch(r"[\d.]+", d.name) and (d / "opera.exe").is_file()]
-    if not versions:
-        return None
-    newest = max(versions, key=lambda d: tuple(int(n) for n in d.name.split(".")))
-    return newest / "opera.exe"
-
-
-def _launch(p, *, visible: bool):
-    exe = opera_gx()
-    browser = {"executable_path": str(exe)} if exe else {"channel": "chrome"}
-    STRATA_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    args = list(LAUNCH_ARGS)
-    if not visible:
-        args.append("--window-position=-32000,-32000")  # a normal window, kept off screen
-    return p.chromium.launch_persistent_context(
-        str(STRATA_PROFILE_DIR), headless=False, no_viewport=True, args=args, **browser)
-
-
-def _open(context, url: str):
-    """A tab showing `url`. A new Opera profile opens its welcome page first, which aborts the
-    first navigation, so that is retried once in a fresh tab."""
-    from patchright.sync_api import Error
-    page = context.pages[0] if context.pages else context.new_page()
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-    except Error as e:
-        if "ERR_ABORTED" not in str(e):
-            raise
-        page.wait_for_timeout(3000)
-        page = context.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-    return page
-
-
-def open_sign_in() -> None:
-    """Open a browser window on strata.ca for the user to sign in; returns when they close it."""
-    from patchright.sync_api import sync_playwright
-    from listingtracker.db import set_state
-    with sync_playwright() as p:
-        context = _launch(p, visible=True)
-        page = _open(context, SIGN_IN_URL)
-        page.bring_to_front()
-        page.wait_for_event("close", timeout=0)
-        context.close()
-    set_state(STATE_SIGNED_OUT, "")
-
+# --- Reading, in the user's own browser signed in to strata.ca (see siteaccounts) -------------
 
 def _pause(span: tuple[float, float], cancel: Optional[Callable[[], bool]] = None) -> None:
     end = time.monotonic() + random.uniform(*span)
@@ -267,8 +208,7 @@ def paused_until() -> Optional[datetime]:
 
 
 def needs_sign_in() -> bool:
-    from listingtracker.db import get_state
-    return not STRATA_PROFILE_DIR.is_dir() or bool(get_state(STATE_SIGNED_OUT))
+    return not siteaccounts.is_signed_in("strata")
 
 
 def refresh(progress: Optional[Callable[[int, int, str], None]] = None,
@@ -296,9 +236,9 @@ def refresh(progress: Optional[Callable[[int, int, str], None]] = None,
 
     done = sales = 0
     stopped = None
-    with sync_playwright() as p:
-        context = _launch(p, visible=False)
-        page = _open(context, SIGN_IN_URL)
+    with siteaccounts.claim("strata"), sync_playwright() as p:
+        context = siteaccounts.launch_profile(p, "strata", visible=False)
+        page = siteaccounts.open_tab(context, SIGN_IN_URL)
         try:
             for i, b in enumerate(buildings):
                 if cancel and cancel():
@@ -313,7 +253,7 @@ def refresh(progress: Optional[Callable[[int, int, str], None]] = None,
                 except StopRun as e:
                     stopped = str(e)
                     if "signed out" in stopped:
-                        set_state(STATE_SIGNED_OUT, datetime.now().isoformat(timespec="seconds"))
+                        siteaccounts.mark_signed_out("strata")
                     else:
                         set_state(STATE_PAUSED, (datetime.now() + PAUSE_AFTER_BLOCK).isoformat(timespec="seconds"))
                     logger.warning("Building sales stopped at %s: %s", b, stopped)
@@ -324,6 +264,7 @@ def refresh(progress: Optional[Callable[[int, int, str], None]] = None,
                 done += 1
                 sales += len(found)
         finally:
+            siteaccounts.keep_fresh(context, [SIGN_IN_URL])
             context.close()
     if progress:
         progress(len(buildings), len(buildings), "")

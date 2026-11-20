@@ -178,6 +178,40 @@ def _get_domain(url: str) -> str:
     return urlparse(url).netloc
 
 
+BROWSER_ARGS = ["--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"]
+
+
+def open_browser(p, show_browser: bool, urls, viewport: Optional[tuple[int, int]] = None):
+    """A browser and context for these pages, carrying the user's saved sign-ins for their sites
+    (see siteaccounts). Returns (browser, context, signed_in)."""
+    from listingtracker import siteaccounts
+    state = siteaccounts.storage_state_for(urls)
+    browser = p.chromium.launch(headless=not show_browser, args=BROWSER_ARGS)
+    vw, vh = viewport or _random_viewport()
+    options = {"viewport": {"width": vw, "height": vh}}
+    if state:
+        options["storage_state"] = state
+        if not show_browser:
+            # A member account browsing as "HeadlessChrome" stands out; say Chrome, as a person's would
+            options["user_agent"] = (f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                     f"(KHTML, like Gecko) Chrome/{browser.version} Safari/537.36")
+    return browser, browser.new_context(**options), bool(state)
+
+
+def _signed_in_domain(url: str) -> bool:
+    from listingtracker import siteaccounts
+    site = siteaccounts.site_for_url(url)
+    return bool(site and siteaccounts.is_signed_in(site.key))
+
+
+def close_browser(browser, context, urls) -> None:
+    """Keep the sites' renewed sign-in cookies, then close."""
+    from listingtracker import siteaccounts
+    siteaccounts.keep_fresh(context, urls)
+    context.close()
+    browser.close()
+
+
 def _check_domain_limit(url: str) -> bool:
     domain = _get_domain(url)
     with _DOMAIN_LOCK:
@@ -390,18 +424,10 @@ def _fetch_domain_batch(
     snapshots: list[Snapshot] = []
     changes: list = []
 
+    urls = [l.url for l in domain_listings]
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=not show_browser,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                ],
-            )
-            vw, vh = _random_viewport()
-            context = browser.new_context(viewport={"width": vw, "height": vh})
+            browser, context, _ = open_browser(p, show_browser, urls)
             page = context.new_page()
 
             for i, listing in enumerate(domain_listings):
@@ -437,8 +463,7 @@ def _fetch_domain_batch(
                 changes.extend(ch)
 
             page.close()
-            context.close()
-            browser.close()
+            close_browser(browser, context, urls)
     except Exception as e:
         logger.error("Domain batch fetch failed: %s", e, exc_info=True)
 
@@ -517,6 +542,10 @@ def fetch_all(
 
         chunks: list[tuple[str, list[Listing]]] = []
         for domain, domain_listings in by_domain.items():
+            if _signed_in_domain(domain_listings[0].url):
+                # One browser at a time on a member account, as a person would browse
+                chunks.append((domain, domain_listings))
+                continue
             batch_total = len(batch)
             workers_for_domain = max(1, round(len(domain_listings) / max(batch_total, 1) * MAX_WORKERS))
             chunk_size = max(1, len(domain_listings) // workers_for_domain)
@@ -576,20 +605,12 @@ def _search_one_site(
     site_discovered: set[str] = set()
     buildings_discovered: set[str] = set()
 
+    urls = [s["url"] for s in site_urls]
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=not show_browser,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                ],
-            )
-            vw, vh = _random_viewport()
-            context = browser.new_context(
-                viewport={"width": vw, "height": vh},
-            )
+            browser, context, signed_in = open_browser(p, show_browser, urls)
+            # A member account goes at a person's pace: pages a few times further apart
+            slow = 3 if signed_in else 1
             page = context.new_page()
 
             for i, search in enumerate(site_urls):
@@ -611,7 +632,7 @@ def _search_one_site(
 
                 try:
                     if i > 0:
-                        time.sleep(random.uniform(3, 8))
+                        time.sleep(random.uniform(3, 8) * slow)
 
                     logger.info("Searching %s", url)
                     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
@@ -677,7 +698,7 @@ def _search_one_site(
                                         done_count[0], total,
                                         f"Building {bi+1}/{len(new_buildings)}: {bname}",
                                     )
-                            time.sleep(random.uniform(2, 5))
+                            time.sleep(random.uniform(2, 5) * slow)
                             page.goto(bp_url, wait_until="domcontentloaded", timeout=30_000)
                             time.sleep(random.uniform(1, 2))
                             html = page.content()
@@ -690,8 +711,7 @@ def _search_one_site(
                             logger.error("Error scraping building %s: %s", bp_url, e)
 
             page.close()
-            context.close()
-            browser.close()
+            close_browser(browser, context, urls)
     except Exception as e:
         logger.error("Browser launch failed for site search: %s", e)
 
@@ -843,16 +863,9 @@ def enrich_listing(
 
     _clean_browser_locks()
 
+    urls = [s["url"] for s in search_urls]
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=not show_browser,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-        )
-        context = browser.new_context(viewport={"width": 1440, "height": 900})
+        browser, context, _ = open_browser(p, show_browser, urls, viewport=(1440, 900))
         page = context.new_page()
 
         for i, search in enumerate(search_urls):
@@ -927,8 +940,7 @@ def enrich_listing(
                 logger.error("Enrichment error for %s: %s", site, e)
 
         page.close()
-        context.close()
-        browser.close()
+        close_browser(browser, context, urls)
 
     return results
 

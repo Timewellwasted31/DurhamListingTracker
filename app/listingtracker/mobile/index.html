@@ -1321,8 +1321,8 @@ function renderComparables(el, data) {
   if (!comps.length) {
     el.innerHTML = COMP_TITLE + `
       <div style="color:var(--text2);font-size:12px;padding:12px 0">
-        No comparables found yet. Similar properties priced above yours are
-        discovered during scheduled checks.
+        No comparables found yet. Cheaper homes at least as big as this one, and similar
+        ones priced above it, are found during scheduled checks.
         <button class="comp-scan-btn" onclick="scanComparables()">Scan Now</button>
       </div>`;
     return;
@@ -1333,7 +1333,7 @@ function renderComparables(el, data) {
 
   for (const c of comps.slice(0, 10)) {
     const gap = c.price_gap;
-    const gapTxt = signedMoney(gap) + (c.in_range ? ' &middot; IN RANGE' : '');
+    const gapTxt = signedMoney(gap) + (c.cheaper ? ' &middot; AS BIG, LOWER PRICE' : c.in_range ? ' &middot; IN RANGE' : '');
     const gapClass = c.in_range ? 'hit' : gap <= tol * 2 ? 'near' : 'far';
     const specs = [c.beds && c.beds + ' bd', c.baths && c.baths + ' ba', c.sqft && c.sqft.toLocaleString() + ' sqft']
       .filter(Boolean).join(' · ');

@@ -1708,14 +1708,20 @@ class DetailPane(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
 
         fav_price = snap.list_price or 0
-        comps = get_comparables_for_favorite(listing.id)
+        comps = []
+        for c in get_comparables_for_favorite(listing.id):
+            comp_snap = get_latest_snapshot(c["listing_id"])
+            if comp_snap and comp_snap.list_price:
+                comps.append((c, comp_snap))
+        # Cheaper ones that are at least as big first: they're better value outright
+        comps.sort(key=lambda cs: (cs[1].list_price > fav_price, -cs[0]["similarity_score"]))
 
         if not comps:
             empty = QLabel(
                 "No comparable properties found yet.\n\n"
                 "Comparables are discovered during scheduled background checks.\n"
-                "Properties in the same city with similar beds/baths/sqft\n"
-                "but higher prices are tracked for price drops."
+                "Cheaper homes in the same city that are at least as big are listed,\n"
+                "and similar ones priced higher are tracked for price drops."
             )
             empty.setStyleSheet("color: #888; font-size: 12px; padding: 20px;")
             empty.setWordWrap(True)
@@ -1724,7 +1730,9 @@ class DetailPane(QWidget):
             layout.addStretch()
             return w
 
-        hdr = QLabel(f"Tracking {len(comps)} similar properties priced above ${fav_price:,.0f}")
+        cheaper = sum(1 for _, cs in comps if cs.list_price <= fav_price)
+        hdr = QLabel(f"{cheaper} cheaper and at least as big, {len(comps) - cheaper} similar but "
+                     f"priced above ${fav_price:,.0f}")
         hdr.setStyleSheet("color: #81d4fa; font-size: 13px; font-weight: bold; margin-bottom: 8px;")
         hdr.setWordWrap(True)
         layout.addWidget(hdr)
@@ -1733,11 +1741,7 @@ class DetailPane(QWidget):
         range_lbl.setStyleSheet("color: #aaa; font-size: 11px; margin-bottom: 12px;")
         layout.addWidget(range_lbl)
 
-        for c in comps[:10]:
-            comp_snap = get_latest_snapshot(c["listing_id"])
-            if not comp_snap or not comp_snap.list_price:
-                continue
-
+        for c, comp_snap in comps[:10]:
             gap = comp_snap.list_price - fav_price
             in_range = gap <= PRICE_TOLERANCE
             trend = c.get("price_trend_pct_per_month")
@@ -1761,7 +1765,9 @@ class DetailPane(QWidget):
             # Price row
             price_txt = f"${comp_snap.list_price:,.0f}"
             gap_txt = f"+${gap:,.0f}" if gap >= 0 else f"−${-gap:,.0f}"
-            if in_range:
+            if gap <= 0:
+                gap_txt += "  ·  AS BIG, LOWER PRICE"
+            elif in_range:
                 gap_txt += "  ·  IN RANGE"
                 gap_color = "#4caf50"
             elif gap <= PRICE_TOLERANCE * 2:

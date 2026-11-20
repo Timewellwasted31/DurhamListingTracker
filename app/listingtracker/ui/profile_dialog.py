@@ -676,6 +676,11 @@ class ProfileDialog(QDialog):
         tl_layout.addStretch()
         tabs.addTab(tl_tab, "Timeline")
 
+        # --- Tab 7: Site sign-ins (shared by every profile) ---
+        from listingtracker.ui.site_accounts import SiteAccountsPanel
+        self.site_accounts = SiteAccountsPanel()
+        tabs.addTab(self.site_accounts, "Site Sign-ins")
+
         layout.addWidget(tabs)
 
         # Buttons
@@ -689,6 +694,13 @@ class ProfileDialog(QDialog):
         buttons.addWidget(save_btn)
         buttons.addWidget(cancel_btn)
         layout.addLayout(buttons)
+
+    def done(self, result):
+        if self.site_accounts.busy():
+            QMessageBox.information(self, "Sign-in window open",
+                                    "Close the site's sign-in window first.")
+            return
+        super().done(result)
 
     def accept(self):
         name = self.name_edit.text().strip() or "Default"

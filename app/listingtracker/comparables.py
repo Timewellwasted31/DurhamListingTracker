@@ -1,8 +1,10 @@
-"""Comparable property tracker — finds similar-but-pricier properties for favorites.
+"""Comparable property tracker for favorites.
 
-For each favorited listing, finds properties in the same city with similar
-characteristics (beds, baths, sqft) but at a higher price, and forecasts from
-their price history when they might drop to within ±$25k of the favorite.
+For each favorited listing, finds properties in the same city with at least as many bedrooms:
+  * cheaper ones that are at least as big (bedrooms, bathrooms, and nearly the floor area), which
+    are simply better value, so there is no price floor for them;
+  * similar but pricier ones, with a forecast from their price history of when they might drop
+    to within $25k of the favorite.
 """
 
 from __future__ import annotations
@@ -21,6 +23,25 @@ SQFT_TOLERANCE = 0.20
 # Maximum price premium to track (200% of favorite's price)
 MAX_PRICE_RATIO = 2.0
 
+# A cheaper listing counts when its floor area is at least this share of the favorite's
+SQFT_MARGIN = 0.95
+MIN_PRICE = 50_000   # below this a "listing" is a parking spot, a locker or a lease
+MAX_CHEAPER = 10
+MAX_PRICIER = 20
+
+
+def at_least_as_big(fav_beds, fav_baths, fav_sqft, beds, baths, sqft) -> bool:
+    """Same or more bedrooms and bathrooms, and the floor area or within a small margin of it.
+    A size the favorite doesn't state can't rule a listing out; one the listing doesn't state can't
+    show it's as big."""
+    if fav_beds and (beds or 0) < fav_beds:
+        return False
+    if fav_baths and (baths or 0) < fav_baths:
+        return False
+    if fav_sqft and (sqft or 0) < fav_sqft * SQFT_MARGIN:
+        return False
+    return True
+
 
 def find_comparables_for_favorite(
     favorite: Listing,
@@ -28,10 +49,8 @@ def find_comparables_for_favorite(
     all_listings: list[Listing],
     all_snapshots: dict[int, Snapshot],
 ) -> list[tuple[int, float]]:
-    """Find listing IDs similar to `favorite` but more expensive.
-
-    Returns list of (listing_id, similarity_score) sorted by score descending.
-    """
+    """Listing IDs worth comparing with `favorite`: cheaper ones at least as big, then similar
+    pricier ones. Returns (listing_id, similarity_score), each group by score, best first."""
     if not fav_snap or not fav_snap.list_price or fav_snap.list_price <= 0:
         return []
 
@@ -42,7 +61,7 @@ def find_comparables_for_favorite(
     fav_city = favorite.city
     fav_type = fav_snap.property_type or ""
 
-    results = []
+    cheaper, pricier = [], []
     for listing in all_listings:
         if listing.id == favorite.id:
             continue
@@ -56,31 +75,26 @@ def find_comparables_for_favorite(
             continue
 
         price = snap.list_price
-
-        # Must be MORE expensive than the favorite
-        if price <= fav_price:
+        sqft = snap.sqft_max or snap.sqft_min or 0
+        if price < MIN_PRICE or price > fav_price * MAX_PRICE_RATIO:
             continue
-        # But not absurdly more
-        if price > fav_price * MAX_PRICE_RATIO:
-            continue
-
-        # Match beds (exact)
-        if fav_beds and snap.beds and snap.beds != fav_beds:
+        # Fewer bedrooms is a smaller home at any price; more is never a reason to leave one out
+        if fav_beds and snap.beds and snap.beds < fav_beds:
             continue
 
-        # Score the similarity
         score = _similarity_score(
             fav_price, fav_beds, fav_baths, fav_sqft, fav_type,
-            price, snap.beds, snap.baths,
-            snap.sqft_max or snap.sqft_min or 0,
-            snap.property_type or "",
+            price, snap.beds, snap.baths, sqft, snap.property_type or "",
         )
+        if price <= fav_price:
+            if at_least_as_big(fav_beds, fav_baths, fav_sqft, snap.beds, snap.baths, sqft):
+                cheaper.append((listing.id, score))
+        elif score >= 40:
+            pricier.append((listing.id, score))
 
-        if score >= 40:
-            results.append((listing.id, score))
-
-    results.sort(key=lambda x: x[1], reverse=True)
-    return results[:20]
+    cheaper.sort(key=lambda x: x[1], reverse=True)
+    pricier.sort(key=lambda x: x[1], reverse=True)
+    return cheaper[:MAX_CHEAPER] + pricier[:MAX_PRICIER]
 
 
 def _similarity_score(
@@ -90,9 +104,12 @@ def _similarity_score(
     """Score 0-100 how similar a comparable is to the favorite (ignoring price direction)."""
     score = 0.0
 
-    # Beds match (exact required, already filtered, but score it)
-    if fav_beds and comp_beds and fav_beds == comp_beds:
-        score += 25
+    # Beds: the same, or more (fewer is filtered out)
+    if fav_beds and comp_beds:
+        if fav_beds == comp_beds:
+            score += 25
+        elif comp_beds > fav_beds:
+            score += 20
 
     # Baths closeness
     if fav_baths and comp_baths:
@@ -120,7 +137,7 @@ def _similarity_score(
         elif _types_similar(fav_type, comp_type):
             score += 8
 
-    # Price proximity bonus — closer price gap = more interesting
+    # Price proximity bonus — closer price gap = more interesting; a lower price is in range
     price_gap_pct = (comp_price - fav_price) / fav_price
     if price_gap_pct <= 0.10:
         score += 15
@@ -166,7 +183,9 @@ def scan_comparables(favorites: list[Listing]) -> tuple[int, list[str]]:
             gap = comp_snap.list_price - fav_snap.list_price
 
             predicted, notes = None, ""
-            if gap <= PRICE_TOLERANCE:
+            if gap <= 0:
+                notes = f"${-gap:,.0f} less, and at least as big"
+            elif gap <= PRICE_TOLERANCE:
                 notes = f"IN RANGE! Gap: ${gap:,.0f}"
                 alerts.append(
                     f"{by_id[listing_id].address}: now ${comp_snap.list_price:,.0f}, "

@@ -299,6 +299,7 @@ def get_comparables(listing_id: int, _=Depends(verify_api_key)):
         gap = comp_snap.list_price - fav_price if fav_price else 0
         result.append(_compact({
             "listing_id": c["listing_id"],
+            "cheaper": gap <= 0,
             "address": c["address"],
             "city": c["city"],
             "similarity_score": c["similarity_score"],
@@ -312,6 +313,8 @@ def get_comparables(listing_id: int, _=Depends(verify_api_key)):
             "predicted_target_date": c.get("predicted_target_date"),
         }))
 
+    # Cheaper ones that are at least as big first: they're better value outright
+    result.sort(key=lambda c: (not c.get("cheaper"), -c["similarity_score"]))
     return {"comparables": result, "favorite_price": fav_price, "tolerance": PRICE_TOLERANCE}
 
 
