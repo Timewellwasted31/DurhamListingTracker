@@ -689,19 +689,31 @@ class ApiError extends Error {
 
 // GETs are retried on network errors and server errors; a refused key is not retried.
 async function apiFetch(path, opts = {}) {
-  const attempts = (opts.method || 'GET') === 'GET' ? RETRIES + 1 : 1;
+  const method = opts.method || 'GET';
+  const attempts = method === 'GET' ? RETRIES + 1 : 1;
   for (let attempt = 1; ; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), API_TIMEOUT);
+    const requestId = newId();
+    const started = Date.now();
     try {
       const resp = await fetch(serverUrl.replace(/\/+$/, '') + path, {
         ...opts,
         signal: controller.signal,
-        headers: { ...(opts.headers || {}), 'X-API-Key': apiKey },
+        headers: { ...(opts.headers || {}), 'X-API-Key': apiKey, 'X-Request-Id': requestId },
       });
       if (!resp.ok) throw new ApiError(resp.status);
-      return await resp.json();
+      const data = await resp.json();
+      sendProblems();  // this request got through, so the saved ones can too
+      return data;
     } catch(e) {
+      logProblem({
+        kind: e instanceof ApiError ? 'http' : e.name === 'AbortError' ? 'timeout'
+              : e instanceof SyntaxError ? 'bad-reply' : 'network',
+        method, path: path.split('?')[0], status: e.status, message: String(e.message || e),
+        attempt, of: attempts, ms: Date.now() - started, request_id: requestId,
+      });
+      try { e.logged = true; } catch(_) {}
       const permanent = e instanceof ApiError && e.status < 500;
       if (permanent || attempt >= attempts) throw e;
       await new Promise(r => setTimeout(r, 1000));
@@ -710,6 +722,74 @@ async function apiFetch(path, opts = {}) {
     }
   }
 }
+
+// ------ Problems, reported to the computer ------
+// A request that fails can't tell the computer it failed, so each failure is kept on the phone
+// and sent with the next request that gets through. The computer writes them to
+// logs/phone-errors.log, saying whether each failed request ever reached it.
+const PROBLEMS_KEY = 'dlt_problems';
+const PROBLEMS_KEPT = 200;
+let sendingProblems = false;
+
+function newId() {
+  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
+function readProblems() {
+  try { return JSON.parse(localStorage.getItem(PROBLEMS_KEY) || '[]'); } catch(e) { return []; }
+}
+
+function writeProblems(list) {
+  try { localStorage.setItem(PROBLEMS_KEY, JSON.stringify(list.slice(-PROBLEMS_KEPT))); } catch(e) {}
+}
+
+function logProblem(entry) {
+  const c = navigator.connection || {};
+  let server = '';
+  try { server = new URL(serverUrl).host; } catch(e) {}
+  const list = readProblems();
+  list.push({
+    id: newId(), at: new Date().toISOString(), online: navigator.onLine,
+    network: c.type || c.effectiveType || undefined, rtt: c.rtt, downlink: c.downlink,
+    visible: document.visibilityState, server, ...entry,
+  });
+  writeProblems(list);
+}
+
+async function sendProblems() {
+  if (sendingProblems || !apiKey) return;
+  const list = readProblems();
+  if (!list.length) return;
+  sendingProblems = true;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT);
+  try {
+    // Plain fetch, not apiFetch: a failure here is not itself worth reporting
+    const resp = await fetch(serverUrl.replace(/\/+$/, '') + '/api/client-errors', {
+      method: 'POST', signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      body: JSON.stringify({ errors: list, agent: navigator.userAgent }),
+    });
+    if (resp.ok) {
+      const sent = new Set(list.map(p => p.id));
+      writeProblems(readProblems().filter(p => !sent.has(p.id)));  // keep any logged meanwhile
+    }
+  } catch(e) {
+    // still unreachable: they stay saved for the next time
+  } finally {
+    clearTimeout(timer);
+    sendingProblems = false;
+  }
+}
+
+window.addEventListener('error', e => logProblem({
+  kind: 'script', message: String(e.message || e.error || 'error'),
+  source: e.filename ? `${e.filename.split('/').pop()}:${e.lineno}:${e.colno}` : undefined,
+}));
+window.addEventListener('unhandledrejection', e => {
+  if (e.reason && e.reason.logged) return;  // a failed request, logged already
+  logProblem({ kind: 'script', message: 'Unhandled: ' + String((e.reason && e.reason.message) || e.reason) });
+});
 
 // ------ Connecting ------
 // Loading the listings doubles as the key check, so connecting costs one request.

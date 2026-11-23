@@ -75,7 +75,8 @@ def use_installed_browsers(environ=None, app_browsers: Path = BROWSERS_DIR) -> N
         return
     local = environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     installed = Path(local) / "ms-playwright"
-    if installed.is_dir():
+    # An emptied folder would hide the browser the app carries with it, so it must hold one
+    if installed.is_dir() and any(d.name.startswith("chromium") for d in installed.iterdir()):
         environ["PLAYWRIGHT_BROWSERS_PATH"] = str(installed)
 
 

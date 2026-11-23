@@ -115,6 +115,12 @@ def test_use_installed_browsers_picks_a_folder_that_exists(tmp_path):
     installed = tmp_path / "ms-playwright"
     installed.mkdir()
 
+    # an emptied install folder is passed over: the browser the frozen app carries is used
+    env = {"LOCALAPPDATA": str(tmp_path), "PLAYWRIGHT_BROWSERS_PATH": "0"}
+    use_installed_browsers(env, no_app_copy)
+    assert env["PLAYWRIGHT_BROWSERS_PATH"] == "0"
+
+    (installed / "chromium_headless_shell-1").mkdir()
     env = {"LOCALAPPDATA": str(tmp_path)}
     use_installed_browsers(env, no_app_copy)
     assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(installed)

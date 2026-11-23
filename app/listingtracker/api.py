@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -51,8 +52,25 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["GET", "POST"],
-    allow_headers=["X-API-Key"],
+    allow_headers=["X-API-Key", "X-Request-Id", "Content-Type"],
 )
+
+
+@app.middleware("http")
+async def remember_phone_requests(request: Request, call_next):
+    """Note each phone request's ID, so a failure the phone reports later can be told apart:
+    one that never got here from one this end answered badly (see phonelog)."""
+    from listingtracker import phonelog
+    rid = request.headers.get("x-request-id")
+    started = time.monotonic()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        if rid:
+            phonelog.remember(rid, request.url.path, status, int((time.monotonic() - started) * 1000))
 
 _http_port: int = HTTP_PORT
 _remote = None  # listingtracker.remote.RemoteAccess once main() has started HTTPS
@@ -316,6 +334,22 @@ def get_comparables(listing_id: int, _=Depends(verify_api_key)):
     # Cheaper ones that are at least as big first: they're better value outright
     result.sort(key=lambda c: (not c.get("cheaper"), -c["similarity_score"]))
     return {"comparables": result, "favorite_price": fav_price, "tolerance": PRICE_TOLERANCE}
+
+
+@app.post("/api/client-errors")
+async def client_errors(request: Request, _=Depends(verify_api_key)):
+    """Problems the phone ran into while it couldn't reach the computer (see phonelog)."""
+    from listingtracker import phonelog
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Expected JSON") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected an object")
+    errors = body.get("errors")
+    kept = await asyncio.to_thread(phonelog.record, errors if isinstance(errors, list) else [],
+                                   str(body.get("agent") or ""))
+    return {"received": kept}
 
 
 @app.post("/api/scan-comparables")

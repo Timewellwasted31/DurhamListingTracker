@@ -1,0 +1,60 @@
+"""Problems the phone reports once it reaches the computer again."""
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from listingtracker import phonelog
+
+
+@pytest.fixture
+def log(tmp_path, monkeypatch):
+    monkeypatch.setattr(phonelog, "LOG_PATH", tmp_path / "phone-errors.log")
+    monkeypatch.setattr(phonelog, "LOGS_DIR", tmp_path)
+    monkeypatch.setattr(phonelog, "_seen", phonelog.OrderedDict())
+    monkeypatch.setattr(phonelog, "_started", 0.0)
+    return tmp_path / "phone-errors.log"
+
+
+def now(**delta):
+    return (datetime.now(timezone.utc) + timedelta(**delta)).isoformat()
+
+
+def test_each_report_says_whether_the_request_reached_the_computer(log):
+    phonelog.remember("ok-1", "/api/listings/5", 200, 42)
+    kept = phonelog.record([
+        {"id": "a", "at": now(), "kind": "timeout", "method": "GET", "path": "/api/listings/5",
+         "attempt": 1, "of": 3, "ms": 15003, "request_id": "ok-1", "online": True, "network": "wifi"},
+        {"id": "b", "at": now(), "kind": "network", "path": "/api/listings/5", "message": "Failed to fetch",
+         "attempt": 2, "of": 3, "ms": 120, "request_id": "lost-2", "online": True, "network": "cellular",
+         "rtt": 300},
+    ], agent="Android WebView")
+    assert kept == 2
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert "2 from the phone (Android WebView)" in lines[0]
+    assert "TIMEOUT | GET /api/listings/5 | try 1/3 | after 15003 ms" in lines[1]
+    assert "reached the computer, which answered 200 in 42 ms" in lines[1]
+    assert "'Failed to fetch'" in lines[2] and "never reached the computer" in lines[2]
+    assert "phone online (cellular, rtt 300 ms)" in lines[2]
+
+
+def test_reports_from_before_a_restart_are_not_called_lost(log, monkeypatch):
+    monkeypatch.setattr(phonelog, "_started", datetime.now(timezone.utc).timestamp())
+    phonelog.record([{"at": now(hours=-2), "kind": "network", "request_id": "x"}])
+    assert "unknown: the computer's app was restarted since" in log.read_text(encoding="utf-8")
+
+
+def test_reports_are_cleaned_and_capped(log):
+    junk = [{"kind": "script", "message": "first line\nsecond line" + "x" * 5000, "status": "not a number",
+             "unexpected": "dropped"}, "not a report", {}]
+    assert phonelog.record(junk * 300) == phonelog.MAX_REPORTS // 3 + 1  # every third is the good one
+    text = log.read_text(encoding="utf-8")
+    assert "unexpected" not in text and "first line second line" in text and "x" * 300 not in text
+    assert len(text.splitlines()) == 1 + phonelog.MAX_REPORTS // 3 + 1
+
+
+def test_only_the_most_recent_request_ids_are_remembered(log, monkeypatch):
+    monkeypatch.setattr(phonelog, "REMEMBERED_REQUESTS", 3)
+    for i in range(5):
+        phonelog.remember(f"r{i}", "/api/listings", 200, 5)
+    assert list(phonelog._seen) == ["r2", "r3", "r4"]
