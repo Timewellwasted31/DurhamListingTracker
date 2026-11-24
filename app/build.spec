@@ -61,6 +61,33 @@ a = Analysis(
     optimize=0,
 )
 
+# Pieces the packaging tools pull in that the app never uses. Nothing kept depends on these Qt
+# libraries (only the PDF and on-screen keyboard plugins do, and they go too). The hidden browser
+# only needs its English language packs, and the app's windows have no translations.
+UNUSED = (
+    "PySide6/Qt6OpenGL.dll", "PySide6/opengl32sw.dll", "PySide6/Qt6Pdf.dll",
+    "PySide6/Qt6Qml", "PySide6/Qt6Quick", "PySide6/Qt6VirtualKeyboard",
+    "PySide6/plugins/imageformats/qpdf.dll",
+    "PySide6/plugins/platforminputcontexts/qtvirtualkeyboardplugin.dll",
+    "PySide6/translations/",
+    "matplotlib/backends/_tkagg",
+)
+CHROMIUM_LOCALES = "chrome-headless-shell-win64/locales/"
+
+
+def wanted(dest):
+    dest = dest.replace("\\", "/")
+    if dest.startswith(UNUSED):
+        return False
+    if CHROMIUM_LOCALES in dest:
+        # en-GB is what it picks on this machine, so sites see the same language as before
+        return dest.rsplit("/", 1)[-1].startswith(("en-US", "en-GB"))
+    return True
+
+
+a.binaries = [entry for entry in a.binaries if wanted(entry[0])]
+a.datas = [entry for entry in a.datas if wanted(entry[0])]
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(

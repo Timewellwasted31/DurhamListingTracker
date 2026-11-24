@@ -26,11 +26,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Files]
-; The PyInstaller output (exe + _internal)
-Source: "W:\ListingTracker\app\dist\DurhamListingTracker\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-
-; Chromium for site search and history — already copied into dist\browser\ms-playwright
-; (included via the recursesubdirs above since it's inside the dist folder)
+; Only the program: the exe and _internal (which carries the hidden browser too).
+; The rest of the dist folder is this computer's own use of the app and must never be packed:
+; data (listings, config with the phone key, profiles), browser (site sign-ins), cache, logs.
+; The app creates those folders itself on first run.
+Source: "W:\ListingTracker\app\dist\DurhamListingTracker\DurhamListingTracker.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "W:\ListingTracker\app\dist\DurhamListingTracker\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
