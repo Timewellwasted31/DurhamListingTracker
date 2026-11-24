@@ -358,10 +358,9 @@ class FetchWorker(QObject):
     finished = Signal(list, list)
     error = Signal(str)
 
-    def __init__(self, listings, show_browser):
+    def __init__(self, listings):
         super().__init__()
         self.listings = listings
-        self.show_browser = show_browser
         self._cancelled = False
 
     def cancel(self):
@@ -377,7 +376,6 @@ class FetchWorker(QObject):
 
             snaps, changes = fetch_all(
                 self.listings,
-                show_browser=self.show_browser,
                 progress_callback=on_progress,
                 cancel_check=lambda: self._cancelled,
                 batch_callback=on_batch,
@@ -417,10 +415,9 @@ class SearchWorker(QObject):
     finished = Signal(list)
     error = Signal(str)
 
-    def __init__(self, search_urls, show_browser):
+    def __init__(self, search_urls):
         super().__init__()
         self.search_urls = search_urls
-        self.show_browser = show_browser
         self._cancelled = False
 
     def cancel(self):
@@ -433,7 +430,6 @@ class SearchWorker(QObject):
 
             urls = search_and_discover(
                 self.search_urls,
-                show_browser=self.show_browser,
                 progress_callback=on_progress,
                 cancel_check=lambda: self._cancelled,
             )
@@ -447,18 +443,14 @@ class HistoryFetchWorker(QObject):
     finished = Signal(int, int)  # listing_id, total snapshot count
     error = Signal(str)
 
-    def __init__(self, listing, show_browser):
+    def __init__(self, listing):
         super().__init__()
         self.listing = listing
-        self.show_browser = show_browser
 
     def run(self):
         try:
-            from patchright.sync_api import sync_playwright
-            from listingtracker.fetcher import (
-                get_adapter_for_url, fetch_listing, _clean_browser_locks,
-                open_browser, close_browser,
-            )
+            from listingtracker.fetcher import get_adapter_for_url, fetch_listing
+            from listingtracker.reader import Reader
             from listingtracker.db import get_snapshots_for_listing
 
             adapter = get_adapter_for_url(self.listing.url)
@@ -466,19 +458,8 @@ class HistoryFetchWorker(QObject):
                 self.error.emit(f"No adapter for {self.listing.url}")
                 return
 
-            _clean_browser_locks()
-
-            with sync_playwright() as p:
-                urls = [self.listing.url]
-                browser, context, _ = open_browser(p, self.show_browser, urls)
-                page = context.new_page()
-
-                snap, _ = fetch_listing(
-                    self.listing, page, adapter, listing_index=0,
-                )
-
-                page.close()
-                close_browser(browser, context, urls)
+            with Reader([self.listing.url]) as reader:
+                fetch_listing(self.listing, reader, adapter, listing_index=0)
 
             all_snaps = get_snapshots_for_listing(self.listing.id)
             self.finished.emit(self.listing.id, len(all_snaps))
@@ -492,25 +473,23 @@ class EnrichWorker(QObject):
     finished = Signal(int, list)  # listing_id, list of {site, url, parsed}
     error = Signal(str)
 
-    def __init__(self, listing, current_snap, search_urls, show_browser):
+    def __init__(self, listing, current_snap, search_urls):
         super().__init__()
         self.listing = listing
         self.current_snap = current_snap
         self.search_urls = search_urls
-        self.show_browser = show_browser
 
     def run(self):
         try:
-            from listingtracker.fetcher import enrich_listing_safe
-            logger.info("EnrichWorker: starting enrich_listing_safe for listing %d", self.listing.id)
-            results = enrich_listing_safe(
+            from listingtracker.fetcher import enrich_listing
+            logger.info("EnrichWorker: searching other sites for listing %d", self.listing.id)
+            results = enrich_listing(
                 self.listing,
                 self.current_snap,
                 self.search_urls,
-                show_browser=self.show_browser,
                 progress_callback=lambda desc: self.progress.emit(desc),
             )
-            logger.info("EnrichWorker: enrich_listing_safe returned %d results", len(results))
+            logger.info("EnrichWorker: found %d results", len(results))
             self.finished.emit(self.listing.id, results)
         except Exception as e:
             logger.error("Enrichment failed: %s", e, exc_info=True)
@@ -665,8 +644,8 @@ class MainWindow(QMainWindow):
 
         self.sales_btn = QPushButton("Building Sales")
         self.sales_btn.setToolTip("Read what units in your listings' buildings sold for, from strata.ca "
-                                  "with your account. Slow on purpose: up to 25 buildings a run, "
-                                  "each building at most once a week.")
+                                  "with your account. Each building is read once and its sales kept; "
+                                  "slow on purpose, up to 25 buildings a run.")
         self.sales_btn.clicked.connect(lambda: self._read_building_sales())
         tb_layout.addWidget(self.sales_btn)
 
@@ -692,10 +671,6 @@ class MainWindow(QMainWindow):
         self.pair_btn.setObjectName("pairBtn")
         self.pair_btn.clicked.connect(self._show_pair_dialog)
         tb_layout.addWidget(self.pair_btn)
-
-        self.show_browser_cb = QCheckBox("Show browser")
-        self.show_browser_cb.setChecked(self.config.get("show_browser", False))
-        tb_layout.addWidget(self.show_browser_cb)
 
         tb_layout.addWidget(QLabel("  "))
         self._list_btn = QPushButton("List")
@@ -1531,7 +1506,7 @@ class MainWindow(QMainWindow):
         self._start_elapsed()
 
         self._fetch_thread = QThread()
-        self._worker = FetchWorker(listings, self.show_browser_cb.isChecked())
+        self._worker = FetchWorker(listings)
         self._worker.moveToThread(self._fetch_thread)
 
         self._fetch_thread.started.connect(self._worker.run)
@@ -1629,7 +1604,7 @@ class MainWindow(QMainWindow):
         stopped = result.get("stopped")
         n, sales = result.get("buildings", 0), result.get("sales", 0)
         msg = (f"{sales} sales read from {n} building{'s' if n != 1 else ''}" if n
-               else "No buildings were due: each is read at most once a week")
+               else "No buildings left to read: each building's sales are read once and kept")
         if stopped:
             msg = f"{stopped}. {msg}" if n else stopped
         operations.finished(msg, ok=not stopped or stopped == "Stopped")
@@ -1816,7 +1791,7 @@ class MainWindow(QMainWindow):
         self._start_elapsed()
 
         self._search_thread = QThread()
-        self._search_worker = SearchWorker(urls, self.show_browser_cb.isChecked())
+        self._search_worker = SearchWorker(urls)
         self._search_worker.moveToThread(self._search_thread)
 
         self._search_thread.started.connect(self._search_worker.run)
@@ -1910,7 +1885,7 @@ class MainWindow(QMainWindow):
             self._start_elapsed()
 
         self._fetch_thread = QThread()
-        self._worker = FetchWorker(listings, self.show_browser_cb.isChecked())
+        self._worker = FetchWorker(listings)
         self._worker.moveToThread(self._fetch_thread)
 
         self._fetch_thread.started.connect(self._worker.run)
@@ -2141,8 +2116,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("History fetch running — wait before cross-checking", 3000)
             return False
 
-        show_browser = self.show_browser_cb.isChecked()
-        worker = EnrichWorker(listing, snap, search_urls, show_browser)
+        worker = EnrichWorker(listing, snap, search_urls)
         thread = QThread()
         worker.moveToThread(thread)
 
@@ -2265,7 +2239,7 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(f"Fetching history for {listing.address or listing.url}...")
 
-        worker = HistoryFetchWorker(listing, self.show_browser_cb.isChecked())
+        worker = HistoryFetchWorker(listing)
         thread = QThread()
         worker.moveToThread(thread)
 
@@ -2329,6 +2303,9 @@ class MainWindow(QMainWindow):
         count, _ = scan_comparables([listing])
         if count:
             self.statusBar().showMessage(f"Found {count} comparable properties", 5000)
+        # Sales since the last look in this building and its comparables' (in the background)
+        from listingtracker import buildingsales
+        buildingsales.catch_up_soon([listing_id])
 
     def _on_notes_saved(self, listing_id: int, text: str):
         for listing in self._listings_cache:

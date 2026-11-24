@@ -7,12 +7,9 @@ from datetime import date
 from pathlib import Path
 
 from listingtracker.paths import (
-    check_w_drive, ensure_directories, use_installed_browsers, LOGS_DIR, MPL_CACHE_DIR,
+    check_w_drive, ensure_directories, LOGS_DIR, MPL_CACHE_DIR,
 )
 
-# Point patchright/playwright at the system-installed browsers, not the
-# bundled driver's relative path (which breaks in PyInstaller builds).
-use_installed_browsers()
 
 # Keep the chart library's font cache with the app's other files instead of the user profile
 os.environ["MPLCONFIGDIR"] = str(MPL_CACHE_DIR)
@@ -145,10 +142,7 @@ def listen_for_other_instances(window, name: str = INSTANCE_NAME):
 
 
 if __name__ == "__main__":
-    if "--enrich-subprocess" in sys.argv:
-        from listingtracker.fetcher import _enrich_subprocess_main
-        _enrich_subprocess_main()
-    elif "--api" in sys.argv:
+    if "--api" in sys.argv:
         sys.argv.remove("--api")
         from listingtracker.api import main as api_main
         api_main()

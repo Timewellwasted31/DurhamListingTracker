@@ -68,6 +68,72 @@ def clean_parsed(parsed: dict) -> dict:
     return parsed
 
 
+# --- Shared by the readers of sites that lay out a listing as labelled facts -------------------
+
+def page_text(fragment: str) -> str:
+    """The visible text of a bit of HTML, on one line."""
+    return " ".join(html_unescape(re.sub(r"<[^>]+>", " ", fragment or "")).split())
+
+
+def money(text: Optional[str]) -> Optional[float]:
+    """The first dollar amount in a value such as "$1,233 Monthly" or "$5,473 /yr"."""
+    m = re.search(r"\$\s*([\d,]+(?:\.\d+)?)", text or "")
+    return float(m.group(1).replace(",", "")) if m else None
+
+
+def split_unit(street: str) -> tuple[Optional[str], str]:
+    """("98", "1780 Simcoe Street N") from "98 - 1780 Simcoe Street N", "TH57-1865 Kingston Road"
+    or "#98 - 1780 ...". A plain street address has no unit."""
+    street = " ".join((street or "").split())
+    m = re.match(r"^(?:Unit\s+|#)?([A-Za-z]{0,3}\d{1,5}[A-Za-z]?)\s*-\s*(\d+[A-Za-z]?\s+\D.*)$", street, re.I)
+    if m:
+        return m.group(1).upper(), m.group(2)
+    # "711 Rossland Road E Unit# 605", "1 A St Suite 12"
+    m = re.match(r"^(\d.*?)[\s,]+(?:Unit|Suite|Apt)\.?\s*#?\s*([A-Za-z]{0,3}\d{1,5}[A-Za-z]?)$", street, re.I)
+    if m:
+        return m.group(2).upper(), m.group(1)
+    return None, street
+
+
+def sqft_range(text: Optional[str]) -> tuple[Optional[int], Optional[int]]:
+    """(1400, 1598) from "1400 - 1598 Sqft"; (750, 750) from "750 sqft"."""
+    nums = [int(n.replace(",", "")) for n in re.findall(r"\d[\d,]*", text or "")][:2]
+    nums = [n for n in nums if n >= 100]
+    if not nums:
+        return None, None
+    return nums[0], nums[-1]
+
+
+def property_kind(kind: Optional[str], ownership: str = "") -> Optional[str]:
+    """A site's wording for the kind of home, in the names the app already uses (the Toronto
+    board's: "Condo Apartment", "Condo Townhouse", "Detached", ...)."""
+    if not kind:
+        return None
+    k = kind.lower()
+    condo = "condo" in k or "strata" in ownership.lower() or "condo" in ownership.lower()
+    if "apart" in k or k in ("apt", "apt/condo", "condo apt", "condo"):
+        return "Condo Apartment" if condo or "apt" in k else "Apartment"
+    if "town" in k or "row" in k:
+        if "att/row" in k:
+            return kind.strip()  # the board's own name for a freehold townhouse, as already stored
+        return "Condo Townhouse" if condo else "Townhouse"
+    if "semi" in k:
+        return "Semi-Detached"
+    if k in ("detached", "single family residence"):
+        return "Detached"
+    if k in ("house", "single family"):
+        return "House"  # Realtor.ca and REW don't say whether it's detached or semi-detached
+    return kind.strip()
+
+
+def days_since(iso_date: Optional[str]) -> Optional[int]:
+    from datetime import date
+    try:
+        return max(0, (date.today() - date.fromisoformat(iso_date)).days)
+    except (TypeError, ValueError):
+        return None
+
+
 class SiteAdapter(ABC):
     """Base class for site-specific scrapers."""
 

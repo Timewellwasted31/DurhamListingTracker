@@ -1445,7 +1445,7 @@ async function scanComparables() {
   try {
     const btn = document.querySelector('.comp-scan-btn');
     if (btn) { btn.textContent = 'Scanning...'; btn.disabled = true; }
-    await apiFetch('/api/scan-comparables', { method: 'POST' });
+    await apiFetch('/api/scan-comparables' + (currentDetailId ? `?listing_id=${currentDetailId}` : ''), { method: 'POST' });
     if (currentDetailId) loadComparables(currentDetailId);
   } catch(e) {
     alert('Scan failed: ' + e.message);

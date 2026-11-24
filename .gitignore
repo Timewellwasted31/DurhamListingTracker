@@ -2,6 +2,8 @@
 data/
 cache/
 logs/
+# Copies of the user's database (listings, favourites, notes): never in the repository
+backups/
 
 # Browser binaries (718 MB Chromium — downloaded separately)
 browser/

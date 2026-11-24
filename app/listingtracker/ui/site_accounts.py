@@ -80,7 +80,7 @@ class SiteAccountsPanel(QWidget):
             "Many sites show sold prices and listing history only to members. Sign in with your "
             "own free account and the app uses it when it rechecks, searches and reads building "
             "sales on that site.<br><br>"
-            f"<b>Sign in</b> opens the site in {browser}, in a separate window used only by this "
+            f"<b>Sign in</b> opens the site in {browser or 'your browser'}, in a separate window used only by this "
             "app. Sign in on the site as you normally would (email and password, or Google), "
             "wait until it shows you as signed in, then close the window. The app never sees "
             "your password: it keeps only the site's sign-in, encrypted so that only your "

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Optional
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode, quote, urlparse
 
 from listingtracker.profiles import BuyerProfile
 
@@ -52,7 +52,7 @@ def build_search_urls(profile: BuyerProfile, sites: list[str] | None = None) -> 
         profile: buyer profile with search criteria
         sites: list of site names to include (None = all sites)
 
-    Returns list of {site, city, url, description}.
+    Returns list of {site, city, url, description, max_price}.
     Uses the buffered price ceiling so we catch near-limit listings too.
     """
     enabled = set(sites) if sites else set(ALL_SEARCH_SITES)
@@ -109,24 +109,28 @@ def build_search_urls(profile: BuyerProfile, sites: list[str] | None = None) -> 
                 "description": f"condos.ca — {city.title()} condos",
             })
 
-        # realtor.ca
+        # realtor.ca, zolo.ca and rew.ca: their condo and townhouse pages (only REW takes a price
+        # limit in the address; the others' results cards are checked against it instead)
+        kinds = [k for k, wanted in (("condos", wants_condo), ("townhouses", wants_townhouse)) if wanted]
         if "realtor.ca" in enabled:
             realtor_slug = CITY_SLUGS_REALTOR.get(city_lower, city_lower)
-            results.append({
-                "site": "realtor.ca",
-                "city": city,
-                "url": f"https://www.realtor.ca/on/{realtor_slug}/real-estate",
-                "description": f"realtor.ca — {city.title()} listings",
-            })
+            for kind in kinds:
+                page = "condos-for-sale" if kind == "condos" else "townhomes-for-sale"
+                results.append({
+                    "site": "realtor.ca",
+                    "city": city,
+                    "url": f"https://www.realtor.ca/on/{realtor_slug}/{page}",
+                    "description": f"realtor.ca — {city.title()} {kind}",
+                })
 
-        # zolo.ca
         if "zolo.ca" in enabled:
-            results.append({
-                "site": "zolo.ca",
-                "city": city,
-                "url": f"https://www.zolo.ca/{city_lower}-real-estate",
-                "description": f"zolo.ca — {city.title()} listings",
-            })
+            for kind in kinds:
+                results.append({
+                    "site": "zolo.ca",
+                    "city": city,
+                    "url": f"https://www.zolo.ca/{city_lower.replace(' ', '-')}-real-estate/{kind}",
+                    "description": f"zolo.ca — {city.title()} {kind}",
+                })
 
         # housesigma.com
         if "housesigma.com" in enabled:
@@ -148,14 +152,16 @@ def build_search_urls(profile: BuyerProfile, sites: list[str] | None = None) -> 
                 "description": f"wahi.com — {city.title()} listings",
             })
 
-        # rew.ca
         if "rew.ca" in enabled:
-            results.append({
-                "site": "rew.ca",
-                "city": city,
-                "url": f"https://www.rew.ca/properties/areas/{city_lower}-on",
-                "description": f"rew.ca — {city.title()} listings",
-            })
+            for kind in kinds:
+                rew_type = "apartment-condo" if kind == "condos" else "townhouse"
+                results.append({
+                    "site": "rew.ca",
+                    "city": city,
+                    "url": f"https://www.rew.ca/properties/areas/{city_lower.replace(' ', '-')}-on/type/{rew_type}"
+                           f"?list_price_to={price_max}",
+                    "description": f"rew.ca — {city.title()} {kind}",
+                })
 
         # condonow.com — condo-focused site
         if "condonow.com" in enabled and wants_condo:
@@ -175,7 +181,71 @@ def build_search_urls(profile: BuyerProfile, sites: list[str] | None = None) -> 
                 "description": f"condominiums.ca — {city.title()} condos",
             })
 
+    for r in results:
+        r["max_price"] = price_max
     return results
+
+
+# --- Results pages -------------------------------------------------------------------------------
+
+# Where each listing's card starts on a results page, for the sites whose cards are read
+_CARD_START = {
+    "zolo.ca": r'<article class="card-listing',
+    "rew.ca": r"<article class='displaycard'",
+    "realtor.ca": r'<a href="/real-estate/\d+/[^"]+" class="blockLink listingDetailsLink"',
+}
+
+
+def listing_cards(html: str, site: str) -> dict[str, dict]:
+    """{listing url: {"price", "mls"}} from the cards on a Zolo, REW or Realtor.ca results page,
+    so listings over budget or already tracked can be passed over without opening them."""
+    from listingtracker.adapters.base import page_text
+    pattern = _CARD_START.get(site)
+    if not pattern:
+        return {}
+    starts = [m.start() for m in re.finditer(pattern, html)] + [len(html)]
+    cards: dict[str, dict] = {}
+    for a, b in zip(starts, starts[1:]):
+        chunk = html[a:b]
+        urls = extract_listing_urls_from_html(chunk, site)
+        if not urls:
+            continue
+        # The card's own listing is its first link (the last card runs on into the page footer)
+        url = min(urls, key=lambda u: chunk.find(urlparse(u).path))
+        m = re.search(r'itemprop="price"[^>]*value="(\d+)"', chunk)
+        text = page_text(re.sub(r"<script.*?</script>", " ", chunk, flags=re.S))
+        price = float(m.group(1)) if m else None
+        if price is None:
+            pm = re.search(r"\$\s*([\d,]{5,})", text)
+            price = float(pm.group(1).replace(",", "")) if pm else None
+        mls = re.search(r"\b([A-Z]\d{7,8})\b", text)
+        cards.setdefault(url, {"price": price, "mls": mls.group(1) if mls else None})
+    return cards
+
+
+def in_searched_town(url: str, site: str, city: str) -> bool:
+    """Zolo, REW and Realtor.ca results pages also show listings elsewhere (featured or nearby,
+    Calgary on an Oshawa page); their listing addresses name the town."""
+    town = city.lower().strip().replace(" ", "-")
+    path = url.lower().rstrip("/")
+    if site == "zolo.ca":
+        return f"/{town}-real-estate/" in path
+    if site == "rew.ca":
+        return path.endswith(f"-{town}-on")
+    if site == "realtor.ca":
+        return f"-{town}-" in path or path.endswith(f"-{town}")
+    return True
+
+
+def next_page(url: str, site: str, n: int) -> Optional[str]:
+    """Page n of a Zolo or REW results page; None for sites that aren't paged this way."""
+    base, _, query = url.partition("?")
+    base = base.rstrip("/")
+    if site == "zolo.ca":
+        return f"{base}/page-{n}" + (f"?{query}" if query else "")
+    if site == "rew.ca":
+        return f"{base}/page/{n}" + (f"?{query}" if query else "")
+    return None
 
 
 def extract_building_urls_from_html(html: str, site: str) -> set[str]:

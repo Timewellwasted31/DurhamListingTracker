@@ -27,7 +27,6 @@ DEFAULTS = {
     "hydro_estimate": _FC.hydro_estimate,
     "insurance_estimate": _FC.insurance_estimate,
     "first_time_buyer": _FC.first_time_buyer,
-    "show_browser": False,
     # Serve the phone app while the desktop app is open (set false to keep phones off)
     "phone_server": True,
 }

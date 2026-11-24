@@ -3,8 +3,9 @@
 Many sites show sold prices and listing history only to signed-in members. The user signs in on
 the site itself, in a browser window the app opens (their installed Opera GX, Chrome or Edge, with
 a separate profile in the app's folder, never their everyday profile). The app never sees or
-stores a password: when the window closes it keeps the site's sign-in cookies, encrypted for the
-user's Windows account, and adds them to the browser that rechecks and searches that site.
+stores a password: while the window is open it reads that site's sign-in (cookies and page
+storage) through the browser's built-in DevTools connection, and keeps it, encrypted for the
+user's Windows account, for the page reader (reader.py) to use on that site.
 
 Every sign-in is shared by all buyer profiles on this computer.
 """
@@ -17,6 +18,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
@@ -30,8 +32,8 @@ logger = logging.getLogger(__name__)
 
 SESSIONS_DIR = BROWSER_DIR / "sessions"
 STATE_PREFIX = "site_account:"      # + key -> ISO date the user signed in; empty when signed out
-LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"]
-OFF_SCREEN = "--window-position=-32000,-32000"  # a normal window, kept off screen (not headless)
+LAUNCH_ARGS = ["--no-first-run", "--no-default-browser-check"]
+POLL_SECONDS = 2  # how often the open window's sign-in is copied
 
 
 @dataclass(frozen=True)
@@ -261,75 +263,122 @@ def _newest(root: Path) -> Optional[Path]:
     return max(versions, key=lambda d: tuple(int(n) for n in d.name.split("."))) / "opera.exe"
 
 
-def installed_browser() -> tuple[str, dict]:
-    """The user's own browser, as (name, patchright launch options).
+def installed_browser() -> tuple[str, Optional[str]]:
+    """The user's own browser, as (name, its program), or ("", None) when none is found.
 
-    An everyday browser rather than the test build the other fetches use: Google refuses its
-    sign-in in a test build ("Error 400"), and sites are less likely to flag the account. For
-    Opera, the newest version folder's opera.exe is used: its root launcher hands off and exits."""
+    An everyday browser: Google refuses its sign-in in a test build ("Error 400"), and sites are
+    less likely to flag the account. For Opera, the newest version folder's opera.exe is used: its
+    root launcher hands off and exits."""
     local = Path(os.environ.get("LOCALAPPDATA", ""))
     for name, folder in (("Opera GX", "Opera GX"), ("Opera", "Opera")):
         exe = _newest(local / "Programs" / folder)
         if exe:
-            return name, {"executable_path": str(exe)}
-    pf = [Path(os.environ.get(v, "")) for v in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")]
-    if any((d / "Google" / "Chrome" / "Application" / "chrome.exe").is_file() for d in pf):
-        return "Chrome", {"channel": "chrome"}
-    if any((d / "Microsoft" / "Edge" / "Application" / "msedge.exe").is_file() for d in pf):
-        return "Edge", {"channel": "msedge"}
-    return "the app's browser", {}
+            return name, str(exe)
+    roots = [Path(os.environ.get(v, "")) for v in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")]
+    for name, rel in (("Chrome", ("Google", "Chrome", "Application", "chrome.exe")),
+                      ("Edge", ("Microsoft", "Edge", "Application", "msedge.exe"))):
+        for root in roots:
+            exe = root.joinpath(*rel)
+            if exe.is_file():
+                return name, str(exe)
+    return "", None
 
 
-def launch_profile(p, key: str, *, visible: bool):
-    """The site's own persistent browser profile in the user's browser."""
-    _, options = installed_browser()
-    folder = profile_dir(key)
-    folder.mkdir(parents=True, exist_ok=True)
-    args = list(LAUNCH_ARGS) + ([] if visible else [OFF_SCREEN])
-    return p.chromium.launch_persistent_context(str(folder), headless=False, no_viewport=True,
-                                                args=args, **options)
+class BrowserWindow:
+    """The user's browser, opened on a site's own profile folder, with a small connection to it
+    (the browser's built-in DevTools protocol, local to this computer and open only while the
+    window is) used for one thing: reading that site's cookies and page storage."""
 
+    def __init__(self, exe: str, folder: Path, url: str, extra_args: Iterable[str] = ()):
+        import subprocess
+        folder.mkdir(parents=True, exist_ok=True)
+        port_file = folder / "DevToolsActivePort"
+        port_file.unlink(missing_ok=True)
+        self.proc = subprocess.Popen([exe, f"--user-data-dir={folder}", "--remote-debugging-port=0",
+                                      *LAUNCH_ARGS, *extra_args, url])
+        self.port = None
+        for _ in range(60):  # the browser writes its port once it is up
+            try:
+                self.port = int(port_file.read_text(encoding="utf-8").split()[0])
+                break
+            except (OSError, ValueError, IndexError):
+                time.sleep(0.5)
+        if not self.port:
+            self.close()
+            raise RuntimeError("The browser didn't open its window")
 
-def open_tab(context, url: str):
-    """A tab showing `url`. A new Opera profile opens its welcome page first, which aborts the
-    first navigation, so that is retried once in a fresh tab."""
-    from patchright.sync_api import Error
-    page = context.pages[0] if context.pages else context.new_page()
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-    except Error as e:
-        if "ERR_ABORTED" not in str(e):
-            raise
-        page.wait_for_timeout(3000)
-        page = context.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-    return page
+    def _json(self, path: str):
+        from curl_cffi import requests
+        return requests.get(f"http://127.0.0.1:{self.port}{path}", timeout=5).json()
+
+    def is_open(self) -> bool:
+        try:
+            return any(t.get("type") == "page" for t in self._json("/json/list"))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _ask(ws_url: str, method: str, params: Optional[dict] = None) -> dict:
+        from curl_cffi.requests import WebSocket
+        ws = WebSocket()
+        ws.connect(ws_url, timeout=10)
+        try:
+            ws.send_str(json.dumps({"id": 1, "method": method, "params": params or {}}))
+            while True:
+                reply = json.loads(ws.recv_str())
+                if reply.get("id") == 1:
+                    if "error" in reply:
+                        raise RuntimeError(reply["error"].get("message", "DevTools error"))
+                    return reply.get("result") or {}
+        finally:
+            ws.close()
+
+    def storage_state(self, site: "Site") -> dict:
+        """The site's cookies and page storage, in the form save_session() keeps."""
+        browser_ws = self._json("/json/version")["webSocketDebuggerUrl"]
+        cookies = []
+        for c in self._ask(browser_ws, "Storage.getCookies").get("cookies") or []:
+            if _on_domain(c.get("domain", ""), site.domains):
+                cookies.append({k: c[k] for k in ("name", "value", "domain", "path", "expires",
+                                                  "httpOnly", "secure", "sameSite") if k in c})
+        origins: dict[str, list] = {}
+        for t in self._json("/json/list"):
+            page = urlparse(t.get("url", ""))
+            if t.get("type") != "page" or not _on_domain(page.netloc, site.domains):
+                continue
+            origin = f"{page.scheme}://{page.netloc}"
+            result = self._ask(t["webSocketDebuggerUrl"], "Runtime.evaluate", {
+                "expression": "JSON.stringify(Object.entries(localStorage))", "returnByValue": True})
+            items = json.loads((result.get("result") or {}).get("value") or "[]")
+            origins[origin] = [{"name": k, "value": v} for k, v in items]
+        return {"cookies": cookies, "origins": [{"origin": o, "localStorage": v} for o, v in origins.items()]}
+
+    def close(self) -> None:
+        if self.proc.poll() is None:
+            self.proc.terminate()
 
 
 def open_sign_in(key: str) -> None:
-    """Open the site in a browser window for the user to sign in; returns when they close it.
+    """Open the site in the user's browser for them to sign in; returns when they close it.
 
-    While the window is open, the site's cookies are copied every couple of seconds, so the last
+    While the window is open, the site's sign-in is copied every couple of seconds, so the last
     copy is the signed-in one however the window gets closed."""
-    from patchright.sync_api import Error, sync_playwright
     site = SITES_BY_KEY[key]
-    with claim(key), sync_playwright() as p:
-        context = launch_profile(p, key, visible=True)
+    name, exe = installed_browser()
+    if not exe:
+        raise RuntimeError("No Opera, Chrome or Edge was found on this computer to sign in with")
+    with claim(key):
+        window = BrowserWindow(exe, profile_dir(key), site.url)
         latest = None
         try:
-            page = open_tab(context, site.url)
-            page.bring_to_front()
-            while context.pages:
+            while window.is_open():
                 try:
-                    latest = context.storage_state()
-                    context.pages[0].wait_for_timeout(2000)
-                except Error:
-                    break  # the window was closed
+                    latest = window.storage_state(site)
+                except Exception as e:  # mid-navigation, or closing
+                    logger.debug("Couldn't read %s's sign-in yet: %s", site.name, e)
+                time.sleep(POLL_SECONDS)
         finally:
-            try:
-                context.close()
-            except Exception:
-                pass
+            window.close()
     if latest:
         save_session(key, latest)
 

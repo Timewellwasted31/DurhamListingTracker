@@ -23,6 +23,7 @@ import os
 import sys
 import time
 from dataclasses import asdict
+from typing import Optional
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Depends, Request
@@ -30,10 +31,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response
 
-from listingtracker.paths import ensure_directories, use_installed_browsers, LOGS_DIR, MPL_CACHE_DIR
+from listingtracker.paths import ensure_directories, LOGS_DIR, MPL_CACHE_DIR
 from listingtracker.remote import HTTP_PORT, HTTPS_PORT, api_key
 
-use_installed_browsers()
 os.environ["MPLCONFIGDIR"] = str(MPL_CACHE_DIR)
 
 logger = logging.getLogger(__name__)
@@ -353,10 +353,22 @@ async def client_errors(request: Request, _=Depends(verify_api_key)):
 
 
 @app.post("/api/scan-comparables")
-def scan_comparables(_=Depends(verify_api_key)):
-    """Trigger a comparable property scan for all favorites."""
-    from listingtracker.db import get_favorited_listings
+def scan_comparables(listing_id: Optional[int] = None, _=Depends(verify_api_key)):
+    """Rescan comparables: for the listing being looked at (whose building's newest sales, and its
+    comparables' buildings', are then looked up in the background), or for all favorites."""
+    from listingtracker.db import get_favorited_listings, get_listing_by_id
     from listingtracker.comparables import scan_comparables as scan
+
+    if listing_id is not None:
+        lst = get_listing_by_id(listing_id)
+        if not lst:
+            raise HTTPException(status_code=404, detail="Listing not found")
+        if not lst.favorited:
+            return {"message": "Only favorited listings have comparables", "count": 0}
+        total, _ = scan([lst])
+        from listingtracker import buildingsales
+        buildingsales.catch_up_soon([listing_id])
+        return {"message": f"Found {total} comparables", "count": total}
 
     favorites = get_favorited_listings()
     if not favorites:

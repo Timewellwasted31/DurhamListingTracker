@@ -30,10 +30,9 @@ IMAGE_CACHE_DIR = CACHE_DIR / "images"
 GEO_CACHE_PATH = CACHE_DIR / "geo_cache.db"
 MPL_CACHE_DIR = CACHE_DIR / "matplotlib"  # chart library's font cache
 
-# Browser profile (persistent logins)
+# Site sign-ins: the sign-in window's browser profiles, and the kept sign-ins
 BROWSER_DIR = ROOT / "browser"
 BROWSER_PROFILE_DIR = BROWSER_DIR / "profile"
-BROWSERS_DIR = BROWSER_DIR / "ms-playwright"  # the Chromium build the app drives
 
 # Profiles
 PROFILES_DIR = DATA_DIR / "profiles"
@@ -54,30 +53,6 @@ RUNTIME_DIRS = [
     BROWSER_PROFILE_DIR,
     LOGS_DIR,
 ]
-
-
-def use_installed_browsers(environ=None, app_browsers: Path = BROWSERS_DIR) -> None:
-    """Point patchright at a Chromium install that exists.
-
-    The app's own copy (BROWSERS_DIR) comes first, because it is there however the app was
-    launched. Per-user installs live under AppData, which a program started from inside a
-    sandboxed app may not see. Failing that, an inherited setting is kept if its folder exists,
-    and the per-user ms-playwright folder is the last resort.
-    """
-    import os
-
-    environ = os.environ if environ is None else environ
-    if app_browsers.is_dir() and any(app_browsers.iterdir()):
-        environ["PLAYWRIGHT_BROWSERS_PATH"] = str(app_browsers)
-        return
-    current = environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
-    if current and Path(current).is_dir():
-        return
-    local = environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    installed = Path(local) / "ms-playwright"
-    # An emptied folder would hide the browser the app carries with it, so it must hold one
-    if installed.is_dir() and any(d.name.startswith("chromium") for d in installed.iterdir()):
-        environ["PLAYWRIGHT_BROWSERS_PATH"] = str(installed)
 
 
 def check_w_drive() -> bool:

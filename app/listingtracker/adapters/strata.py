@@ -155,6 +155,10 @@ class StrataAdapter(SiteAdapter):
                      "ensuite_laundry", "outdoor_space", "possession_date",
                      "rent_controlled"):
             result.setdefault(key, None)
+        if not result["unit"]:
+            # Some pages leave the unit out of their data; the address ends with it (".../unit-105")
+            m = re.search(r"unit-([A-Za-z0-9]{1,8})/?$", url or "")
+            result["unit"] = m.group(1).upper() if m else None
 
         # Detect rental listings via HTML-level signals
         if self._is_rental_page(html):

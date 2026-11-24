@@ -1,12 +1,14 @@
 """Past sales of other units in the same building, read from strata.ca with the user's own account.
 
 Strata shows a building's full listing history, sold prices included, only to signed-in members.
-The user signs in once in a browser window the app opens; that session is kept in the app's own
-browser folder and reused, read-only, to look at building pages.
+The user signs in once in their own browser (see siteaccounts); the sign-in is kept and reused,
+read-only, by the app's page reader (see reader.py), which reads a building the way its page does:
+it loads the page, makes the same requests the page's scripts make to Strata's data service, in the
+same order and form, with the member's sign-in, and reads the sales from the replies.
 
 The account must not get flagged, so this reads like a person browsing, slowly, and stops early:
-  * one building page per building, and not again for a week;
-  * on it, the "Sold" filter and a few "Show more" clicks, a few seconds apart;
+  * each building is read once and its sales kept: past sales don't change, so it isn't read again;
+  * on it, the "Sold" history and a few more pages of it, as "Show more" clicks, seconds apart;
   * 30 to 60 seconds between buildings, and at most 25 buildings a run;
   * any sign of a block or a challenge ends the run and pauses reading for a day;
   * finding itself signed out ends the run too (the user signs in again).
@@ -14,33 +16,41 @@ The account must not get flagged, so this reads like a person browsing, slowly, 
 
 from __future__ import annotations
 
-import json
 import logging
 import random
 import re
 import statistics
+import threading
 import time
+import uuid
 from datetime import date, datetime, timedelta
 from typing import Callable, Iterable, Optional
 from urllib.parse import urlparse
 
 from listingtracker import siteaccounts
+from listingtracker.reader import Reader
 
 logger = logging.getLogger(__name__)
 
 SIGN_IN_URL = "https://strata.ca/"
+SITE = "https://strata.ca"
+API_URL = "https://api.slaterealty.ca/graphql"  # Strata's data service, which its pages call
+FIRST_SOLD = 10  # the page asks for the 10 latest sales, then 8 more per "Show more"
+MORE_SOLD = 8
 
-RECHECK_DAYS = 7
 MAX_BUILDINGS_PER_RUN = 25
 PAUSE_BETWEEN_BUILDINGS = (30.0, 60.0)
 PAUSE_BETWEEN_CLICKS = (3.0, 7.0)
-MAX_SHOW_MORE = 4          # the page shows 8 more per click: a few years of sales in most buildings
+MAX_SHOW_MORE = 4          # 8 more sales each: a few years of sales in most buildings
 YEARS_BACK = 3             # stop paging once the sales shown are older than this
 PAUSE_AFTER_BLOCK = timedelta(hours=24)
 SHOWN_MONTHS = 36          # how far back the app shows a building's sales
 
-STATE_CHECKED = "building_sales_checked:"   # + building -> ISO date it was last read
+STATE_CHECKED = "building_sales_checked:"   # + building -> ISO date its history was read in full
 STATE_PAUSED = "building_sales_paused_until"
+STATE_LATEST = "building_sales_latest:"     # + building -> ISO date its newest sales were last looked at
+LATEST_EVERY = timedelta(days=7)            # how often a comparables check may look again
+MAX_CATCH_UP = 6                            # buildings looked at per comparables check
 
 
 class StopRun(Exception):
@@ -64,18 +74,15 @@ def _is_multi_unit(listing, snap) -> bool:
 
 
 def buildings_to_read(listings: Iterable, snapshots: dict, checked: dict[str, str],
-                      today: Optional[date] = None, limit: int = MAX_BUILDINGS_PER_RUN) -> list[str]:
-    """Buildings due a read, favourites' first, then the longest unread; at most `limit`."""
-    today = today or date.today()
+                      limit: int = MAX_BUILDINGS_PER_RUN) -> list[str]:
+    """Buildings whose history hasn't been read yet, favourites' first; at most `limit`. A building
+    read in full is never read again: its past sales are already stored."""
     due: dict[str, tuple] = {}
     for lst in listings:
         b = building_of(lst.url)
-        if not b or not _is_multi_unit(lst, snapshots.get(lst.id)):
+        if not b or not _is_multi_unit(lst, snapshots.get(lst.id)) or checked.get(b):
             continue
-        last = checked.get(b)
-        if last and (today - date.fromisoformat(last[:10])).days < RECHECK_DAYS:
-            continue
-        rank = (not lst.favorited, last or "")
+        rank = (not lst.favorited, lst.id)
         due[b] = min(due.get(b, rank), rank)
     return sorted(due, key=lambda b: due[b])[:limit]
 
@@ -114,21 +121,30 @@ def parse_sales(body: dict, building: str) -> list[dict]:
     return out
 
 
-def _is_sales_query(post: Optional[str], building: str) -> bool:
-    if not post or "SEARCH_LISTINGS_QUERY" not in post:
-        return False
-    try:
-        f = (json.loads(post).get("variables") or {}).get("filter") or {}
-    except ValueError:
-        return False
-    return "SOLD" in (f.get("propertyListingStates") or []) and building.split("/")[-1] in (f.get("propertyUids") or [])
+def listings_request(building: str, states: list[str], limit: int, offset: int, order: str,
+                     direction: str, ownership: str = "BUY") -> dict:
+    """The body of one of the building page's listing requests, exactly as the page builds it."""
+    from listingtracker.strata_query import SEARCH_LISTINGS_QUERY
+    return {
+        "query": SEARCH_LISTINGS_QUERY,
+        "variables": {"filter": {
+            "limit": limit,
+            "listingSort": {"listingOrderBy": order, "sortDirection": direction},
+            "offset": offset,
+            "ownershipPreference": ownership,
+            "propertyListingStates": states,
+            "propertyUids": [building.split("/")[-1]],
+        }},
+        "operationName": "SEARCH_LISTINGS_QUERY",
+    }
 
 
 _CHALLENGE = re.compile(r"just a moment|checking your browser|access denied|are you a robot|captcha|too many requests",
                         re.IGNORECASE)
+_SIGNED_OUT = re.compile(r"auth|token|sign.?in|log.?in|permission|forbidden", re.IGNORECASE)
 
 
-# --- Reading, in the user's own browser signed in to strata.ca (see siteaccounts) -------------
+# --- Reading, with the user's own strata.ca sign-in (see siteaccounts) ------------------------
 
 def _pause(span: tuple[float, float], cancel: Optional[Callable[[], bool]] = None) -> None:
     end = time.monotonic() + random.uniform(*span)
@@ -138,65 +154,66 @@ def _pause(span: tuple[float, float], cancel: Optional[Callable[[], bool]] = Non
         time.sleep(0.5)
 
 
-def _check_page(page, status: Optional[int]) -> None:
-    if status in (401, 403, 429) or (status or 0) >= 500:
-        raise StopRun(f"strata.ca answered {status}")
-    title = page.title() or ""
-    if _CHALLENGE.search(title):
-        raise StopRun(f"strata.ca showed a check page ({title[:60]})")
-    if page.get_by_text("Sign In | Join").count() or page.get_by_text("Account Required").count():
+def _ask(reader, body: dict, headers: dict) -> dict:
+    """One of the page's requests to the data service; anything but a plain answer stops the run."""
+    status, reply = reader.call(API_URL, body, page_origin=SITE, headers=headers)
+    if status == 401:
         raise StopRun("signed out of strata.ca")
+    if status in (403, 429) or status >= 500:
+        raise StopRun(f"strata.ca's data service answered {status}")
+    errors = (reply or {}).get("errors") or []
+    if any(_SIGNED_OUT.search(str(e.get("message", ""))) for e in errors):
+        raise StopRun("signed out of strata.ca")
+    if errors:
+        logger.warning("strata.ca's data service reported: %s", str(errors)[:300])
+    return reply or {}
 
 
-def read_building(page, building: str, cancel=None) -> list[dict]:
-    """Every sale the building's history shows within YEARS_BACK, newest first."""
+def read_building(reader, building: str, headers: dict, cancel=None,
+                  known: Optional[set] = None) -> list[dict]:
+    """Every sale the building's history shows within YEARS_BACK, newest first. Given the sales
+    already `known` ({(unit, sold date)}), it stops at the first page that reaches one of them:
+    everything newer has then been read."""
+    page = reader.get(f"{SITE}/{building}")
+    if page.status in (401, 403, 429) or page.status >= 500:
+        raise StopRun(f"strata.ca answered {page.status}")
+    title = re.search(r"<title[^>]*>(.*?)</title>", page.html[:20000], re.S | re.I)
+    if title and _CHALLENGE.search(title.group(1)):
+        raise StopRun(f"strata.ca showed a check page ({title.group(1).strip()[:60]})")
+    if page.status == 404:
+        return []  # not a building page (any more)
+
+    # What the page asks for as it opens: the building's homes for sale and for rent
+    _ask(reader, listings_request(building, ["ACTIVE", "SOLD_CONDITIONALLY"], 1000, 0, "PRICE", "ASC", "BUY"), headers)
+    _ask(reader, listings_request(building, ["ACTIVE", "SOLD_CONDITIONALLY"], 1000, 0, "PRICE", "ASC", "RENT"), headers)
+    _pause(PAUSE_BETWEEN_CLICKS, cancel)  # reading the page, then choosing the sold history
+
     found: dict[tuple, dict] = {}
-    blocked: list[int] = []
-
-    def on_response(resp):
-        if "slaterealty.ca/graphql" not in resp.url:
-            return
-        if resp.status in (401, 403, 429):
-            blocked.append(resp.status)
-            return
-        if _is_sales_query(resp.request.post_data, building):
-            try:
-                for s in parse_sales(resp.json(), building):
-                    found[(s["unit"], s["sold_date"])] = s
-            except Exception as e:  # a reply we can't read is skipped, not fatal
-                logger.debug("Unreadable sales reply for %s: %s", building, e)
-
-    page.on("response", on_response)
-    try:
-        resp = page.goto(f"https://strata.ca/{building}", wait_until="domcontentloaded", timeout=60_000)
-        page.wait_for_timeout(random.uniform(3000, 6000))
-        _check_page(page, resp.status if resp else None)
-        status = page.locator('select[aria-label="Listing status"]')
-        if not status.count():
-            return []  # no history section: nothing sold here, or not a building page
-        status.scroll_into_view_if_needed()
-        page.wait_for_timeout(random.uniform(1000, 2500))
-        status.select_option("SOLD")
+    cutoff = (date.today() - timedelta(days=365 * YEARS_BACK)).isoformat()
+    offset, limit = 0, FIRST_SOLD
+    for _ in range(1 + MAX_SHOW_MORE):
+        if cancel and cancel():
+            break
+        reply = _ask(reader, listings_request(building, ["SOLD"], limit, offset, "UNAVAILABLE_DATE", "DESC"), headers)
+        result = ((reply.get("data") or {}).get("listingsNew") or {})
+        items = result.get("listings") or []
+        sold = [it.get("propertyListing") or {} for it in items]
+        sold = [pl for pl in sold if pl.get("propertyListingState") == "SOLD"]
+        if sold and not any(pl.get("soldPrice") for pl in sold):
+            raise StopRun("signed out of strata.ca")  # sold prices are shown to members only
+        page_sales = parse_sales(reply, building)
+        for s in page_sales:
+            found[(s["unit"], s["sold_date"])] = s
+        if known and any((s["unit"], s["sold_date"]) in known for s in page_sales):
+            break  # caught up with what's stored
+        offset += limit
+        limit = MORE_SOLD
+        total = (result.get("pagingStats") or {}).get("totalCount") or 0
+        if not items or offset >= total:
+            break  # no "Show more" any more
+        if found and min(s["sold_date"] for s in found.values()) < cutoff:
+            break
         _pause(PAUSE_BETWEEN_CLICKS, cancel)
-        cutoff = (date.today() - timedelta(days=365 * YEARS_BACK)).isoformat()
-        for _ in range(MAX_SHOW_MORE):
-            if blocked:
-                raise StopRun(f"strata.ca answered {blocked[0]}")
-            if cancel and cancel():
-                break
-            if found and min(s["sold_date"] for s in found.values()) < cutoff:
-                break
-            more = page.locator("#historic-listings").get_by_text("Show more", exact=True)
-            if not more.count():
-                break
-            more.first.scroll_into_view_if_needed()
-            page.wait_for_timeout(random.uniform(500, 1500))
-            more.first.click()
-            _pause(PAUSE_BETWEEN_CLICKS, cancel)
-        if blocked:
-            raise StopRun(f"strata.ca answered {blocked[0]}")
-    finally:
-        page.remove_listener("response", on_response)
     return sorted(found.values(), key=lambda s: s["sold_date"], reverse=True)
 
 
@@ -215,7 +232,6 @@ def refresh(progress: Optional[Callable[[int, int, str], None]] = None,
             cancel: Optional[Callable[[], bool]] = None) -> dict:
     """Read the sales of the buildings that are due. Returns {buildings, sales, stopped}, where
     `stopped` says why the run ended early, if it did."""
-    from patchright.sync_api import sync_playwright
     from listingtracker.db import (get_all_latest_snapshots, get_all_listings, get_state,
                                    save_area_sales, save_building_sales, set_state)
 
@@ -234,41 +250,132 @@ def refresh(progress: Optional[Callable[[int, int, str], None]] = None,
     if not buildings:
         return {"buildings": 0, "sales": 0, "stopped": None}
 
+    return _read_buildings(buildings, cities, progress, cancel)
+
+
+def _read_buildings(buildings: list[str], cities: dict, progress=None, cancel=None,
+                    newest_only: bool = False) -> dict:
+    """Read these buildings' sales one after another, a person's pace apart, and store them.
+    With `newest_only`, a building already read in full is read only back to the sales stored."""
+    from listingtracker.db import get_building_sales, get_state, save_area_sales, save_building_sales, set_state
+
     done = sales = 0
     stopped = None
-    with siteaccounts.claim("strata"), sync_playwright() as p:
-        context = siteaccounts.launch_profile(p, "strata", visible=False)
-        page = siteaccounts.open_tab(context, SIGN_IN_URL)
-        try:
-            for i, b in enumerate(buildings):
-                if cancel and cancel():
-                    stopped = "Stopped"
-                    break
-                if i:
-                    _pause(PAUSE_BETWEEN_BUILDINGS, cancel)
-                if progress:
-                    progress(i, len(buildings), b.split("/")[-1].replace("-", " "))
-                try:
-                    found = read_building(page, b, cancel)
-                except StopRun as e:
-                    stopped = str(e)
-                    if "signed out" in stopped:
-                        siteaccounts.mark_signed_out("strata")
-                    else:
-                        set_state(STATE_PAUSED, (datetime.now() + PAUSE_AFTER_BLOCK).isoformat(timespec="seconds"))
-                    logger.warning("Building sales stopped at %s: %s", b, stopped)
-                    break
-                save_building_sales(found)
-                save_area_sales([_as_area_sale(s, cities.get(b)) for s in found])
-                set_state(STATE_CHECKED + b, date.today().isoformat())
-                done += 1
-                sales += len(found)
-        finally:
-            siteaccounts.keep_fresh(context, [SIGN_IN_URL])
-            context.close()
+    with siteaccounts.claim("strata"), Reader([SIGN_IN_URL]) as reader:
+        token = reader.stored(SITE, "Slate-Authorization")
+        if not token:
+            siteaccounts.mark_signed_out("strata")
+            return {"buildings": 0, "sales": 0, "stopped": "Sign in to strata.ca first"}
+        # What the page's scripts send with every request: the site, this browser's visitor id
+        # (kept from the sign-in) and the member's sign-in
+        headers = {"Slate-Website": "strata", "Slate-PV": reader.stored(SITE, "Slate-PV") or str(uuid.uuid4()),
+                   "Slate-Authorization": token}
+        for i, b in enumerate(buildings):
+            if cancel and cancel():
+                stopped = "Stopped"
+                break
+            if i:
+                _pause(PAUSE_BETWEEN_BUILDINGS, cancel)
+            if progress:
+                progress(i, len(buildings), b.split("/")[-1].replace("-", " "))
+            full = not (newest_only and get_state(STATE_CHECKED + b))
+            known = None if full else {(s["unit"], s["sold_date"]) for s in get_building_sales(b)}
+            try:
+                found = read_building(reader, b, headers, cancel, known=known)
+            except StopRun as e:
+                stopped = str(e)
+                if "signed out" in stopped:
+                    siteaccounts.mark_signed_out("strata")
+                else:
+                    set_state(STATE_PAUSED, (datetime.now() + PAUSE_AFTER_BLOCK).isoformat(timespec="seconds"))
+                logger.warning("Building sales stopped at %s: %s", b, stopped)
+                break
+            except Exception as e:  # the connection dropped: try the rest another day
+                stopped = f"Couldn't reach strata.ca ({type(e).__name__})"
+                logger.warning("Building sales stopped at %s: %s", b, e)
+                break
+            new = [s for s in found if not known or (s["unit"], s["sold_date"]) not in known]
+            save_building_sales(new)
+            save_area_sales([_as_area_sale(s, cities.get(b)) for s in new])
+            if cancel and cancel():
+                stopped = "Stopped"  # cut short: what was read is kept, and the rest read next time
+                break
+            today = date.today().isoformat()
+            set_state(STATE_LATEST + b, today)
+            if full:
+                set_state(STATE_CHECKED + b, today)
+            done += 1
+            sales += len(new)
+            if newest_only:
+                logger.info("Newest sales of %s: %d new", b, len(new))
     if progress:
         progress(len(buildings), len(buildings), "")
     return {"buildings": done, "sales": sales, "stopped": stopped}
+
+
+# --- Newer sales, when a listing's comparables are checked --------------------------------------
+
+def buildings_for_comparables(listing) -> list[str]:
+    """The listing's own building, then its comparables' buildings (best match first): the ones
+    whose recent sales say most about its price. Houses have none."""
+    from listingtracker.db import get_building_sales, get_comparables_for_favorite, get_latest_snapshot, get_listing_by_id
+    all_sales = get_building_sales()
+    candidates = [listing] + [get_listing_by_id(c["listing_id"]) for c in get_comparables_for_favorite(listing.id)]
+    out: list[str] = []
+    for lst in candidates:
+        if not lst or not _is_multi_unit(lst, get_latest_snapshot(lst.id)):
+            continue
+        b = _building_for(lst, all_sales)
+        if b and b not in out:
+            out.append(b)
+    return out
+
+
+def catch_up(listings, cancel: Optional[Callable[[], bool]] = None) -> dict:
+    """After a comparables check: the sales since the last look, in these listings' buildings and
+    their comparables' buildings. Each building is looked at most once a week, at most
+    MAX_CATCH_UP of them, and only back to the sales already stored."""
+    from listingtracker.db import get_state
+    if needs_sign_in() or paused_until():
+        return {"buildings": 0, "sales": 0, "stopped": "Not signed in to strata.ca, or paused"}
+    wanted: list[str] = []
+    cities: dict[str, str] = {}
+    for lst in listings:
+        for b in buildings_for_comparables(lst):
+            if b not in wanted:
+                wanted.append(b)
+                cities[b] = lst.city
+    week_ago = (date.today() - LATEST_EVERY).isoformat()
+    due = [b for b in wanted if (get_state(STATE_LATEST + b) or "") <= week_ago][:MAX_CATCH_UP]
+    if not due:
+        return {"buildings": 0, "sales": 0, "stopped": None}
+    try:
+        return _read_buildings(due, cities, cancel=cancel, newest_only=True)
+    except siteaccounts.Busy:
+        return {"buildings": 0, "sales": 0, "stopped": "strata.ca is already being read"}
+
+
+_catching_up = threading.Lock()
+
+
+def catch_up_soon(listing_ids: Iterable[int]) -> None:
+    """catch_up() in the background, so a comparables check never waits on strata.ca. One at a time."""
+    ids = list(listing_ids)
+
+    def run():
+        if not _catching_up.acquire(blocking=False):
+            return
+        try:
+            from listingtracker.db import get_listing_by_id
+            result = catch_up([lst for i in ids if (lst := get_listing_by_id(i))])
+            if result["buildings"] or result["stopped"]:
+                logger.info("Building sales caught up: %s", result)
+        except Exception as e:
+            logger.warning("Catching up building sales failed: %s", e)
+        finally:
+            _catching_up.release()
+
+    threading.Thread(target=run, name="building-sales-catch-up", daemon=True).start()
 
 
 def _all_buildings(listings) -> set[str]:

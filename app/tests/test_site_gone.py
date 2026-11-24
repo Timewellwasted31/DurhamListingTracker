@@ -21,29 +21,22 @@ def test_unit_numbers_are_read_but_css_colours_are_not():
     assert unit("border:1px solid #000;") is None
 
 
-class RedirectedPage:
-    """A browser page that ends up on another site, as wahi.com now does."""
-    url = "https://johnstonanddaniel.com/?redirect_source=wahi"
+class RedirectedReader:
+    """A site that sends every page to another site, as wahi.com now does."""
 
-    def goto(self, *a, **k): pass
-    def set_viewport_size(self, *a): pass
-    def content(self): return "<html><style>a{color:#58595b}</style>Luxury Real Estate</html>"
-
-    class mouse:
-        @staticmethod
-        def move(*a, **k): pass
-
-    def evaluate(self, *a, **k): pass
+    def get(self, url):
+        from listingtracker.reader import Page
+        return Page(url="https://johnstonanddaniel.com/?redirect_source=wahi", status=200,
+                    html="<html><style>a{color:#58595b}</style>Luxury Real Estate</html>")
 
 
 def test_a_redirect_to_another_site_keeps_the_stored_listing(monkeypatch):
     saved = []
-    monkeypatch.setattr(fetcher, "_check_robots", lambda url: True)
-    monkeypatch.setattr(fetcher, "_bezier_move", lambda *a: None)
-    monkeypatch.setattr(fetcher, "_random_scroll", lambda *a: None)
+    monkeypatch.setattr(fetcher, "_check_robots", lambda *a: True)
+    monkeypatch.setattr(fetcher.time, "sleep", lambda s: None)
     monkeypatch.setattr(fetcher, "add_snapshot", lambda snap: saved.append(snap))
     monkeypatch.setattr(fetcher, "update_listing", lambda lst: saved.append(lst))
     listing = Listing(id=1, url="https://wahi.com/ca/en/real-estate/on/gta/durham/x/1-a-st-l1t3l8-ontario",
                       site="wahi.com", address="1 A St", unit=None)
-    assert fetcher.fetch_listing(listing, RedirectedPage(), WahiAdapter()) == (None, [])
+    assert fetcher.fetch_listing(listing, RedirectedReader(), WahiAdapter()) == (None, [])
     assert saved == [] and listing.unit is None

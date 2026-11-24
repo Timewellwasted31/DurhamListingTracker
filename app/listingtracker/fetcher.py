@@ -1,4 +1,4 @@
-"""Browser orchestration — fetch listings via patchright."""
+"""Read listing and search pages with our own page reader (see reader.py)."""
 
 from __future__ import annotations
 
@@ -7,18 +7,20 @@ import logging
 import random
 import threading
 import time
-import math
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
-from urllib.robotparser import RobotFileParser
 from urllib.parse import urlparse
 
-from listingtracker.paths import HTML_CACHE_DIR, BROWSER_PROFILE_DIR
+from listingtracker.paths import HTML_CACHE_DIR
 from listingtracker.models import Listing, Snapshot, Status
 from listingtracker.db import (
     add_snapshot,
     delete_listing,
+    listings_with_mls,
+    replaceable,
+    site_rank,
+    tracked_mls_numbers,
     get_latest_snapshot,
     get_consecutive_blocked_count,
     update_listing,
@@ -39,6 +41,7 @@ from listingtracker.adapters.rew import RewAdapter
 from listingtracker.adapters.condonow import CondoNowAdapter
 from listingtracker.adapters.condominiums import CondominiumsAdapter
 from listingtracker.diffing import diff_snapshots, sort_changes
+from listingtracker.reader import Reader, allowed
 
 logger = logging.getLogger(__name__)
 
@@ -115,16 +118,8 @@ def get_adapter_for_url(url: str) -> Optional[SiteAdapter]:
     return None
 
 
-def _check_robots(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-        rp = RobotFileParser()
-        rp.set_url(robots_url)
-        rp.read()
-        return rp.can_fetch("*", url)
-    except Exception:
-        return True
+def _check_robots(url: str, reader: Optional[Reader] = None) -> bool:
+    return allowed(url, reader)
 
 
 def _random_delay(listing_index: int) -> None:
@@ -132,37 +127,6 @@ def _random_delay(listing_index: int) -> None:
     if listing_index > 0 and listing_index % 5 == 0:
         base += random.uniform(3, 8)
     time.sleep(base)
-
-
-def _random_viewport() -> tuple[int, int]:
-    w = 1440 + random.randint(-80, 80)
-    h = 900 + random.randint(-60, 60)
-    return w, h
-
-
-def _bezier_move(page, x: int, y: int) -> None:
-    """Move mouse along a bezier curve to (x, y)."""
-    cx, cy = random.randint(100, 500), random.randint(100, 300)
-
-    steps = random.randint(15, 30)
-    cp1x = cx + (x - cx) * random.uniform(0.2, 0.4) + random.randint(-50, 50)
-    cp1y = cy + (y - cy) * random.uniform(0.1, 0.3) + random.randint(-30, 30)
-    cp2x = cx + (x - cx) * random.uniform(0.6, 0.8) + random.randint(-50, 50)
-    cp2y = cy + (y - cy) * random.uniform(0.7, 0.9) + random.randint(-30, 30)
-
-    for i in range(1, steps + 1):
-        t = i / steps
-        bx = (1-t)**3*cx + 3*(1-t)**2*t*cp1x + 3*(1-t)*t**2*cp2x + t**3*x
-        by = (1-t)**3*cy + 3*(1-t)**2*t*cp1y + 3*(1-t)*t**2*cp2y + t**3*y
-        page.mouse.move(bx, by)
-        time.sleep(random.uniform(0.01, 0.03))
-
-
-def _random_scroll(page) -> None:
-    """Randomized scroll depth and dwell."""
-    scroll_amount = random.randint(300, 1200)
-    page.mouse.wheel(0, scroll_amount)
-    time.sleep(random.uniform(2, 6))
 
 
 def _store_html(html: str, snapshot_id: int) -> str:
@@ -178,38 +142,10 @@ def _get_domain(url: str) -> str:
     return urlparse(url).netloc
 
 
-BROWSER_ARGS = ["--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"]
-
-
-def open_browser(p, show_browser: bool, urls, viewport: Optional[tuple[int, int]] = None):
-    """A browser and context for these pages, carrying the user's saved sign-ins for their sites
-    (see siteaccounts). Returns (browser, context, signed_in)."""
-    from listingtracker import siteaccounts
-    state = siteaccounts.storage_state_for(urls)
-    browser = p.chromium.launch(headless=not show_browser, args=BROWSER_ARGS)
-    vw, vh = viewport or _random_viewport()
-    options = {"viewport": {"width": vw, "height": vh}}
-    if state:
-        options["storage_state"] = state
-        if not show_browser:
-            # A member account browsing as "HeadlessChrome" stands out; say Chrome, as a person's would
-            options["user_agent"] = (f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                     f"(KHTML, like Gecko) Chrome/{browser.version} Safari/537.36")
-    return browser, browser.new_context(**options), bool(state)
-
-
 def _signed_in_domain(url: str) -> bool:
     from listingtracker import siteaccounts
     site = siteaccounts.site_for_url(url)
     return bool(site and siteaccounts.is_signed_in(site.key))
-
-
-def close_browser(browser, context, urls) -> None:
-    """Keep the sites' renewed sign-in cookies, then close."""
-    from listingtracker import siteaccounts
-    siteaccounts.keep_fresh(context, urls)
-    context.close()
-    browser.close()
 
 
 def _check_domain_limit(url: str) -> bool:
@@ -227,10 +163,9 @@ def _increment_domain_count(url: str) -> None:
 
 def fetch_listing(
     listing: Listing,
-    page,
+    reader: Reader,
     adapter: SiteAdapter,
     listing_index: int = 0,
-    headless: bool = True,
     progress_callback=None,
 ) -> tuple[Optional[Snapshot], list]:
     """Fetch a single listing. Returns (snapshot, changes)."""
@@ -240,7 +175,7 @@ def fetch_listing(
         logger.warning("Domain load limit reached for %s, skipping", listing.url)
         return None, []
 
-    if not _check_robots(listing.url):
+    if not _check_robots(listing.url, reader):
         logger.warning("Blocked by robots.txt: %s", listing.url)
         return None, []
 
@@ -250,16 +185,10 @@ def fetch_listing(
     try:
         logger.info("Fetching %s", listing.url)
 
-        page.goto(listing.url, wait_until="domcontentloaded", timeout=30_000)
-
-        vw, vh = _random_viewport()
-        page.set_viewport_size({"width": vw, "height": vh})
-
-        _bezier_move(page, random.randint(200, 600), random.randint(200, 400))
-        _random_scroll(page)
-
-        html = page.content()
+        page = reader.get(listing.url)
+        html = page.html
         _increment_domain_count(listing.url)
+        time.sleep(random.uniform(2, 6))  # time a person spends on the page: the pace sites saw before
 
         landed = urlparse(page.url or "").netloc
         if landed and not adapter.matches(landed):
@@ -268,8 +197,8 @@ def fetch_listing(
             logger.warning("%s now opens %s; keeping the stored data", listing.url, landed)
             return None, []
 
-        if adapter.detect_blocked(html):
-            logger.warning("BLOCKED on %s", listing.url)
+        if page.refused or adapter.detect_blocked(html):
+            logger.warning("BLOCKED on %s (answered %d)", listing.url, page.status)
             prev = get_latest_snapshot(listing.id)
 
             # If we already have good data, don't overwrite with a blocked snapshot
@@ -301,6 +230,22 @@ def fetch_listing(
             logger.info("Skipping rental listing: %s", listing.url)
             delete_listing(listing.id)
             return None, []
+
+        # A home also on other sites: one copy is kept, so the same unit doesn't appear once per
+        # site. A better site's copy (SITE_PREFERENCE) wins over one just found; a favourite, a
+        # listing with notes or one tracked from before always stays.
+        if parsed.get("mls_number") and get_latest_snapshot(listing.id) is None:
+            others = listings_with_mls(parsed["mls_number"], other_than=listing.id)
+            if any(site_rank(o["site"]) <= site_rank(listing.site) for o in others):
+                logger.info("%s is MLS %s, already tracked from %s; not added twice", listing.url,
+                            parsed["mls_number"], min(others, key=lambda o: site_rank(o["site"]))["site"])
+                delete_listing(listing.id)
+                return None, []
+            for o in others:
+                if replaceable(o):
+                    logger.info("%s is MLS %s; it replaces the copy just found on %s",
+                                listing.url, parsed["mls_number"], o["site"])
+                    delete_listing(o["id"])
 
         if parsed.get("address"):
             listing.address = parsed["address"]
@@ -392,44 +337,21 @@ def fetch_listing(
             return None, []
 
 
-def _clean_browser_locks() -> None:
-    """Remove stale lock files that prevent Chromium from starting."""
-    lock_file = BROWSER_PROFILE_DIR / "SingletonLock"
-    if lock_file.exists():
-        try:
-            lock_file.unlink()
-            logger.info("Removed stale browser lock file")
-        except OSError:
-            pass
-    cookie_lock = BROWSER_PROFILE_DIR / "SingletonCookie"
-    if cookie_lock.exists():
-        try:
-            cookie_lock.unlink()
-        except OSError:
-            pass
-
-
 def _fetch_domain_batch(
     domain_listings: list[Listing],
-    show_browser: bool,
     progress_callback,
     progress_lock,
     done_count: list,
     total: int,
     cancel_check=None,
 ) -> tuple[list[Snapshot], list]:
-    """Fetch all listings for one domain in a dedicated browser."""
-    from patchright.sync_api import sync_playwright
-
+    """Fetch these listings from one site, one after another, as one visit."""
     snapshots: list[Snapshot] = []
     changes: list = []
 
     urls = [l.url for l in domain_listings]
     try:
-        with sync_playwright() as p:
-            browser, context, _ = open_browser(p, show_browser, urls)
-            page = context.new_page()
-
+        with Reader(urls) as reader:
             for i, listing in enumerate(domain_listings):
                 if cancel_check and cancel_check():
                     break
@@ -454,16 +376,10 @@ def _fetch_domain_batch(
                             listing.address or listing.url,
                         )
 
-                snap, ch = fetch_listing(
-                    listing, page, adapter, listing_index=i,
-                    headless=not show_browser,
-                )
+                snap, ch = fetch_listing(listing, reader, adapter, listing_index=i)
                 if snap:
                     snapshots.append(snap)
                 changes.extend(ch)
-
-            page.close()
-            close_browser(browser, context, urls)
     except Exception as e:
         logger.error("Domain batch fetch failed: %s", e, exc_info=True)
 
@@ -492,9 +408,7 @@ BATCH_SIZE = 50
 
 def fetch_all(
     listings: list[Listing],
-    headless: bool = True,
     progress_callback=None,
-    show_browser: bool = False,
     cancel_check=None,
     batch_callback=None,
 ) -> tuple[list[Snapshot], list]:
@@ -530,7 +444,6 @@ def fetch_all(
 
         with _DOMAIN_LOCK:
             DOMAIN_LOAD_COUNTS.clear()
-        _clean_browser_locks()
 
         by_domain: dict[str, list[Listing]] = {}
         for listing in batch:
@@ -543,7 +456,7 @@ def fetch_all(
         chunks: list[tuple[str, list[Listing]]] = []
         for domain, domain_listings in by_domain.items():
             if _signed_in_domain(domain_listings[0].url):
-                # One browser at a time on a member account, as a person would browse
+                # One visit at a time on a member account, as a person would browse
                 chunks.append((domain, domain_listings))
                 continue
             batch_total = len(batch)
@@ -562,7 +475,7 @@ def fetch_all(
             for domain, chunk in chunks:
                 futures[executor.submit(
                     _fetch_domain_batch,
-                    chunk, show_browser,
+                    chunk,
                     progress_callback, progress_lock, done_count, total,
                     cancel_check,
                 )] = domain
@@ -589,29 +502,32 @@ def fetch_all(
     return all_snapshots, sort_changes(all_changes)
 
 
+SEARCH_PAGES = 3  # results pages read per Zolo or REW search, while each brings new listings
+
+
 def _search_one_site(
     site_urls: list[dict],
-    show_browser: bool,
     cancel_check,
     progress_callback,
     progress_lock,
     done_count: list,
     total: int,
+    tracked_mls: frozenset = frozenset(),
 ) -> set[str]:
-    """Search all pages for one site in its own browser instance."""
-    from patchright.sync_api import sync_playwright
-    from listingtracker.search import extract_listing_urls_from_html, extract_building_urls_from_html
+    """Read one site's search pages, one after another, as one visit."""
+    from listingtracker.search import (
+        extract_listing_urls_from_html, extract_building_urls_from_html, in_searched_town,
+        listing_cards, next_page,
+    )
 
     site_discovered: set[str] = set()
     buildings_discovered: set[str] = set()
 
     urls = [s["url"] for s in site_urls]
     try:
-        with sync_playwright() as p:
-            browser, context, signed_in = open_browser(p, show_browser, urls)
+        with Reader(urls) as reader:
             # A member account goes at a person's pace: pages a few times further apart
-            slow = 3 if signed_in else 1
-            page = context.new_page()
+            slow = 3 if reader.signed_in else 1
 
             for i, search in enumerate(site_urls):
                 if cancel_check and cancel_check():
@@ -626,7 +542,7 @@ def _search_one_site(
                         done_count[0] += 1
                         progress_callback(done_count[0] - 1, total, desc)
 
-                if not _check_robots(url):
+                if not _check_robots(url, reader):
                     logger.warning("Blocked by robots.txt: %s", url)
                     continue
 
@@ -634,38 +550,46 @@ def _search_one_site(
                     if i > 0:
                         time.sleep(random.uniform(3, 8) * slow)
 
-                    logger.info("Searching %s", url)
-                    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-
-                    _bezier_move(page, random.randint(200, 600), random.randint(200, 400))
-                    time.sleep(random.uniform(1, 3))
-
                     page_urls: set[str] = set()
                     page_buildings: set[str] = set()
-                    prev_count = 0
-                    stale_scrolls = 0
-                    for scroll_pass in range(20):
+                    seen: set[str] = set()
+                    passed = 0
+                    queue, pages_read = [url], 0
+                    while queue and pages_read < SEARCH_PAGES:
                         if cancel_check and cancel_check():
                             break
-                        html = page.content()
-                        found = extract_listing_urls_from_html(html, site)
-                        page_urls.update(found)
-
-                        # For strata.ca, also extract building URLs
+                        page_url = queue.pop(0)
+                        if pages_read:
+                            time.sleep(random.uniform(3, 8) * slow)
+                        logger.info("Searching %s", page_url)
+                        page = reader.get(page_url)
+                        pages_read += 1
+                        if page.refused:
+                            logger.warning("%s answered %d to %s", site, page.status, page_url)
+                            break
+                        found = set(extract_listing_urls_from_html(page.html, site))
+                        fresh = found - seen
+                        seen |= found
                         if site == "strata.ca":
-                            page_buildings.update(extract_building_urls_from_html(html, site))
-
-                        combined = len(page_urls) + len(page_buildings)
-                        if combined == prev_count:
-                            stale_scrolls += 1
-                            if stale_scrolls >= 3 and scroll_pass > 3:
-                                break
-                        else:
-                            stale_scrolls = 0
-                        prev_count = combined
-
-                        page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
-                        time.sleep(random.uniform(1.5, 3))
+                            page_buildings |= set(extract_building_urls_from_html(page.html, site))
+                        cards = listing_cards(page.html, site)
+                        for u in fresh:
+                            card = cards.get(u, {})
+                            over_budget = bool(card.get("price") and search.get("max_price")
+                                               and card["price"] > search["max_price"])
+                            if (over_budget or card.get("mls") in tracked_mls
+                                    or not in_searched_town(u, site, search.get("city", ""))):
+                                passed += 1
+                            else:
+                                page_urls.add(u)
+                        time.sleep(random.uniform(2, 5))  # time a person spends looking at the results
+                        if fresh:  # a page past the end shows the first again
+                            nxt = next_page(url, site, pages_read + 1)
+                            if nxt:
+                                queue.append(nxt)
+                    if passed:
+                        logger.info("Passed over %d listings on %s (elsewhere, over budget or already tracked)",
+                                    passed, desc)
 
                     logger.info("Found %d URLs + %d buildings on %s",
                                 len(page_urls), len(page_buildings), desc)
@@ -675,9 +599,9 @@ def _search_one_site(
                 except Exception as e:
                     logger.error("Error searching %s: %s", url, e)
 
-            # Phase 2: scrape discovered building pages for all units
+            # Phase 2: read discovered building pages for all their units
             if buildings_discovered:
-                # Remove buildings we already found units from
+                # Skip buildings we already found units from
                 existing_buildings = set()
                 for url in site_discovered:
                     parts = url.rstrip("/").rsplit("/", 1)
@@ -686,7 +610,7 @@ def _search_one_site(
                 new_buildings = buildings_discovered - existing_buildings
 
                 if new_buildings:
-                    logger.info("Scraping %d building pages for units", len(new_buildings))
+                    logger.info("Reading %d building pages for units", len(new_buildings))
                     for bi, bp_url in enumerate(sorted(new_buildings)):
                         if cancel_check and cancel_check():
                             break
@@ -698,37 +622,33 @@ def _search_one_site(
                                         done_count[0], total,
                                         f"Building {bi+1}/{len(new_buildings)}: {bname}",
                                     )
-                            time.sleep(random.uniform(2, 5) * slow)
-                            page.goto(bp_url, wait_until="domcontentloaded", timeout=30_000)
-                            time.sleep(random.uniform(1, 2))
-                            html = page.content()
-                            found = extract_listing_urls_from_html(html, "strata.ca")
+                            time.sleep(random.uniform(3, 7) * slow)
+                            page = reader.get(bp_url)
+                            if page.refused:
+                                logger.warning("strata.ca answered %d to %s", page.status, bp_url)
+                                continue
+                            found = set(extract_listing_urls_from_html(page.html, "strata.ca"))
                             new = found - site_discovered
                             if new:
                                 logger.info("Building %s: %d new units", bp_url, len(new))
                             site_discovered.update(found)
                         except Exception as e:
-                            logger.error("Error scraping building %s: %s", bp_url, e)
-
-            page.close()
-            close_browser(browser, context, urls)
+                            logger.error("Error reading building %s: %s", bp_url, e)
     except Exception as e:
-        logger.error("Browser launch failed for site search: %s", e)
+        logger.error("Site search failed: %s", e)
 
     return site_discovered
 
 
 def search_and_discover(
     search_urls: list[dict],
-    show_browser: bool = False,
     progress_callback=None,
     cancel_check=None,
 ) -> list[str]:
-    """Discover listing URLs via sitemaps and browser-based search.
+    """Discover listing URLs via sitemaps and the sites' search pages.
 
-    Sitemap discovery runs in parallel with browser scraping for maximum
-    speed and coverage. Sites with accessible sitemaps (condos.ca, wahi.com)
-    use the sitemap path; others fall back to scroll-based browser search.
+    Sitemap discovery runs in parallel with the search pages for speed and coverage. Sites with
+    accessible sitemaps (condos.ca, wahi.com) use the sitemap path; others read search pages.
 
     Args:
         search_urls: list of {site, city, url, description} from build_search_urls
@@ -745,9 +665,9 @@ def search_and_discover(
     for s in search_urls:
         by_site.setdefault(s["site"], []).append(s)
 
-    # Determine which sites use sitemaps vs browser search
+    # Determine which sites use sitemaps vs search pages
     sitemap_sites = [s for s in by_site if s in SITEMAP_CONFIGS]
-    browser_sites = {s: urls for s, urls in by_site.items() if s not in SITEMAP_CONFIGS}
+    page_sites = {s: urls for s, urls in by_site.items() if s not in SITEMAP_CONFIGS}
 
     # Collect cities from search URLs for sitemap filtering
     all_cities = list(dict.fromkeys(s["city"] for s in search_urls))
@@ -757,10 +677,8 @@ def search_and_discover(
     progress_lock = threading.Lock()
     done_count = [0]
 
-    _clean_browser_locks()
-
-    # Run sitemap + browser discovery in parallel
-    max_workers = min(len(browser_sites) + 1, 4)
+    # Run sitemap + search page discovery in parallel
+    max_workers = min(len(page_sites) + 1, 4)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures: dict = {}
 
@@ -778,12 +696,16 @@ def search_and_discover(
                 )
             futures[executor.submit(_sitemap_task)] = "sitemap"
 
-        # Submit browser-based search per site
-        for site, urls in browser_sites.items():
+        # Submit search page reading per site
+        try:
+            tracked = frozenset(tracked_mls_numbers())
+        except Exception:  # no database yet
+            tracked = frozenset()
+        for site, urls in page_sites.items():
             futures[executor.submit(
                 _search_one_site,
-                urls, show_browser, cancel_check,
-                progress_callback, progress_lock, done_count, total,
+                urls, cancel_check,
+                progress_callback, progress_lock, done_count, total, tracked,
             )] = site
 
         for f in as_completed(futures):
@@ -834,7 +756,6 @@ def enrich_listing(
     listing: Listing,
     current_snap: Optional[Snapshot],
     search_urls: list[dict],
-    show_browser: bool = False,
     progress_callback=None,
 ) -> list[dict]:
     """Search other sites for this listing and return parsed data per site.
@@ -847,7 +768,6 @@ def enrich_listing(
 
     Returns list of {site, url, parsed: dict} for each site where data was found.
     """
-    from patchright.sync_api import sync_playwright
     from listingtracker.crossref import is_same_property, rank_candidate_urls
     from listingtracker.search import extract_listing_urls_from_html
 
@@ -861,14 +781,14 @@ def enrich_listing(
         price = parsed.get("list_price")
         return bool(price and price > 10000 and is_same_property(listing, parsed))
 
-    _clean_browser_locks()
-
+    deadline = time.monotonic() + ENRICH_TIMEOUT
     urls = [s["url"] for s in search_urls]
-    with sync_playwright() as p:
-        browser, context, _ = open_browser(p, show_browser, urls, viewport=(1440, 900))
-        page = context.new_page()
-
+    with Reader(urls) as reader:
         for i, search in enumerate(search_urls):
+            if time.monotonic() > deadline:
+                logger.warning("Enrichment stopped after %ds; %d sites not searched",
+                               ENRICH_TIMEOUT, len(search_urls) - i)
+                break
             url = search["url"]
             site = search["site"]
             desc = search.get("description", site)
@@ -876,7 +796,7 @@ def enrich_listing(
             if progress_callback:
                 progress_callback(f"Searching {desc}")
 
-            if not _check_robots(url):
+            if not _check_robots(url, reader):
                 logger.warning("Blocked by robots.txt: %s", url)
                 continue
 
@@ -885,44 +805,39 @@ def enrich_listing(
                     time.sleep(random.uniform(5, 12))
 
                 logger.info("Enrichment: searching %s", url)
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-
-                vw, vh = _random_viewport()
-                page.set_viewport_size({"width": vw, "height": vh})
-
-                _bezier_move(page, random.randint(200, 600), random.randint(200, 400))
-                time.sleep(random.uniform(3, 6))
-                _random_scroll(page)
-
-                html = page.content()
+                page = reader.get(url)
+                html = page.html
                 _increment_domain_count(url)
+                time.sleep(random.uniform(3, 6))
+                if page.refused:
+                    logger.info("Enrichment: %s answered %d", site, page.status)
+                    continue
 
                 adapter = get_adapter_for_url(url)
                 if not adapter:
                     continue
 
                 # The search may have redirected straight to the listing's own page
-                parsed = clean_parsed(adapter.parse(html, url=url))
+                parsed = clean_parsed(adapter.parse(html, url=page.url))
                 found = confirmed(parsed)
+                if found:
+                    url = page.url
 
                 if not found:
                     # A results page: open the likeliest links until one is confirmed as this
                     # property. Taking the first link blindly matched unrelated listings.
                     candidates = rank_candidate_urls(extract_listing_urls_from_html(html, site), listing)
                     for listing_url in candidates[:ENRICH_CANDIDATES_PER_SITE]:
-                        logger.info("Enrichment: navigating to listing %s", listing_url)
+                        logger.info("Enrichment: opening listing %s", listing_url)
                         time.sleep(random.uniform(3, 8))
-                        page.goto(listing_url, wait_until="domcontentloaded", timeout=30_000)
-                        _bezier_move(page, random.randint(200, 600), random.randint(200, 400))
-                        time.sleep(random.uniform(2, 5))
-                        _random_scroll(page)
-                        html = page.content()
+                        page = reader.get(listing_url)
                         _increment_domain_count(listing_url)
+                        time.sleep(random.uniform(2, 5))
 
                         listing_adapter = get_adapter_for_url(listing_url)
-                        if not listing_adapter:
+                        if not listing_adapter or page.refused:
                             continue
-                        parsed = clean_parsed(listing_adapter.parse(html, url=listing_url))
+                        parsed = clean_parsed(listing_adapter.parse(page.html, url=listing_url))
                         if confirmed(parsed):
                             found = True
                             url = listing_url
@@ -939,183 +854,4 @@ def enrich_listing(
             except Exception as e:
                 logger.error("Enrichment error for %s: %s", site, e)
 
-        page.close()
-        close_browser(browser, context, urls)
-
     return results
-
-
-def _enrich_subprocess_main() -> None:
-    """Entry point for the enrichment subprocess. Uses file-based I/O."""
-    import json, sys, traceback
-
-    from listingtracker.paths import LOGS_DIR, use_installed_browsers
-    use_installed_browsers()
-
-    try:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            handlers=[logging.FileHandler(LOGS_DIR / f"tracker-{date.today().isoformat()}.log",
-                                          encoding="utf-8")],
-        )
-    except OSError:
-        pass
-
-    input_path = None
-    output_path = None
-    args = sys.argv[1:]
-    for i, arg in enumerate(args):
-        if arg == "--input" and i + 1 < len(args):
-            input_path = args[i + 1]
-        elif arg == "--output" and i + 1 < len(args):
-            output_path = args[i + 1]
-
-    if not input_path or not output_path:
-        sys.exit(1)
-
-    data = json.loads(Path(input_path).read_text(encoding="utf-8"))
-
-    ld = data["listing"]
-    if ld.get("date_added") and isinstance(ld["date_added"], str):
-        try:
-            ld["date_added"] = datetime.fromisoformat(ld["date_added"])
-        except (ValueError, TypeError):
-            ld["date_added"] = None
-    listing = Listing(**ld)
-
-    snap = None
-    if data.get("snap"):
-        sd = data["snap"]
-        if sd.get("fetched_at") and isinstance(sd["fetched_at"], str):
-            try:
-                sd["fetched_at"] = datetime.fromisoformat(sd["fetched_at"])
-            except (ValueError, TypeError):
-                sd["fetched_at"] = None
-        if sd.get("status") and isinstance(sd["status"], str):
-            try:
-                sd["status"] = Status(sd["status"])
-            except (ValueError, KeyError):
-                sd["status"] = Status.UNKNOWN
-        snap = Snapshot(**sd)
-
-    search_urls = data["search_urls"]
-    show_browser = data.get("show_browser", False)
-
-    try:
-        results = enrich_listing(listing, snap, search_urls, show_browser=show_browser)
-    except Exception:
-        # The packaged app has no console, so the parent reads the reason from this file
-        Path(output_path + ".err").write_text(traceback.format_exc(), encoding="utf-8")
-        sys.exit(1)
-    Path(output_path).write_text(json.dumps(results, default=str), encoding="utf-8")
-
-
-def _enrich_command(input_file: Path, output_file: Path) -> list[str]:
-    """Command that runs the site search in a separate copy of this app.
-
-    The packaged app runs its own executable, so it needs nothing installed on the machine: no
-    system Python, no packages, no source checkout.
-    """
-    import sys
-
-    args = ["--enrich-subprocess", "--input", str(input_file), "--output", str(output_file)]
-    if getattr(sys, "frozen", False):
-        return [sys.executable] + args
-    return [sys.executable, "-m", "listingtracker"] + args
-
-
-def enrich_listing_safe(
-    listing: Listing,
-    current_snap: Optional[Snapshot],
-    search_urls: list[dict],
-    show_browser: bool = False,
-    progress_callback=None,
-) -> list[dict]:
-    """Run enrich_listing in a subprocess so Chromium crashes don't kill the main app.
-
-    Uses file-based I/O to fully isolate Chromium from the parent GUI process.
-    """
-    import json, subprocess, sys, os
-    from dataclasses import asdict
-    from listingtracker.paths import APP_DIR, CACHE_DIR
-
-    listing_data = asdict(listing)
-    snap_data = asdict(current_snap) if current_snap else None
-    payload = json.dumps({
-        "listing": listing_data,
-        "snap": snap_data,
-        "search_urls": search_urls,
-        "show_browser": show_browser,
-    }, default=str)
-
-    env = os.environ.copy()
-
-    if progress_callback:
-        progress_callback("Starting enrichment subprocess...")
-
-    tmp_dir = CACHE_DIR / "enrich"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    input_file = tmp_dir / "input.json"
-    output_file = tmp_dir / "output.json"
-    error_file = tmp_dir / "output.json.err"
-
-    input_file.write_text(payload, encoding="utf-8")
-    for stale in (output_file, error_file):
-        stale.unlink(missing_ok=True)
-
-    file_cmd = _enrich_command(input_file, output_file)
-
-    logger.info("enrich_listing_safe: launching subprocess %s", file_cmd)
-    creation_flags = 0
-    if sys.platform == "win32":
-        creation_flags = (
-            subprocess.CREATE_NEW_PROCESS_GROUP
-            | subprocess.CREATE_NO_WINDOW
-        )
-    try:
-        proc = subprocess.Popen(
-            file_cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            env=env,
-            cwd=None if getattr(sys, "frozen", False) else str(APP_DIR),
-            creationflags=creation_flags,
-        )
-        _, stderr = proc.communicate(timeout=ENRICH_TIMEOUT)
-        returncode = proc.returncode
-        logger.info("enrich_listing_safe: subprocess returned with exit code %d", returncode)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        logger.error("Enrichment subprocess timed out after %ds", ENRICH_TIMEOUT)
-        return []
-    except Exception as e:
-        logger.error("enrich_listing_safe: Popen raised %s: %s", type(e).__name__, e)
-        return []
-
-    if returncode != 0:
-        err_text = stderr.decode("utf-8", errors="replace") if stderr else ""
-        if error_file.exists():
-            err_text = error_file.read_text(encoding="utf-8", errors="replace")
-            error_file.unlink(missing_ok=True)
-        err_text = err_text[-1500:]  # the end of a traceback is the part that names the error
-        logger.error("Enrichment subprocess failed (exit %d): %s", returncode, err_text)
-        return []
-
-    if not output_file.exists():
-        logger.error("Enrichment subprocess produced no output file")
-        return []
-
-    try:
-        return json.loads(output_file.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        logger.error("Enrichment subprocess output error: %s", e)
-        return []
-    finally:
-        for f in (input_file, output_file):
-            try:
-                f.unlink(missing_ok=True)
-            except OSError:
-                pass

@@ -596,6 +596,39 @@ def _delete_listings(conn: sqlite3.Connection, ids: list[int]) -> None:
     conn.execute(f"DELETE FROM listings WHERE id IN ({ph})", ids)
 
 
+# When the same home is on several sites, the copy kept: Strata carries the building's sales and
+# the fullest history, then the others by how much they show
+SITE_PREFERENCE = ("strata.ca", "condos.ca", "zolo.ca", "realtor.ca", "rew.ca")
+JUST_FOUND = timedelta(days=1)  # a copy this new, untouched by the user, may give way to a better one
+
+
+def site_rank(site: str) -> int:
+    return SITE_PREFERENCE.index(site) if site in SITE_PREFERENCE else len(SITE_PREFERENCE)
+
+
+def listings_with_mls(mls_number: str, other_than: int) -> list[dict]:
+    """The other listings of the same MLS listing (the same home on other sites), with what decides
+    which copy is kept: site, favourite, notes and when it was found."""
+    if not mls_number:
+        return []
+    with _connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT id, site, favorited, user_notes, date_added FROM listings WHERE mls_number = ? AND id != ? "
+            "ORDER BY id", (mls_number, other_than))]
+
+
+def replaceable(row: dict) -> bool:
+    """A copy found in the last day that the user hasn't favourited or written on."""
+    recent = (datetime.utcnow() - JUST_FOUND).isoformat()
+    return not row["favorited"] and not (row["user_notes"] or "").strip() and (row["date_added"] or "") >= recent
+
+
+def tracked_mls_numbers() -> set[str]:
+    with _connect() as conn:
+        return {r[0] for r in conn.execute("SELECT mls_number FROM listings WHERE mls_number IS NOT NULL "
+                                           "AND mls_number != ''")}
+
+
 def delete_listing(listing_id: int) -> None:
     with _connect() as conn:
         _delete_listings(conn, [listing_id])
@@ -669,6 +702,19 @@ def cleanup_bad_listings(after_fetch: bool = False) -> int:
             else:
                 seen_urls[norm] = r["id"]
 
+        # The same home just found on several sites (one MLS number): searches read several sites
+        # at once, so each can add it before the others are known. The best site's copy is kept
+        # (SITE_PREFERENCE), and copies just found give way to it; a favourite, a listing with
+        # notes, or one tracked from before is never removed.
+        groups: dict[str, list[dict]] = {}
+        for r in conn.execute(
+                "SELECT id, site, favorited, user_notes, date_added, mls_number FROM listings "
+                "WHERE mls_number IN (SELECT mls_number FROM listings WHERE mls_number IS NOT NULL "
+                "AND mls_number != '' GROUP BY mls_number HAVING count(*) > 1)"):
+            groups.setdefault(r["mls_number"], []).append(dict(r))
+        for rows in groups.values():
+            best = min(rows, key=lambda r: (site_rank(r["site"]), r["id"]))
+            ids_to_delete.update(r["id"] for r in rows if r is not best and replaceable(r))
         ids = list(ids_to_delete)
         _delete_listings(conn, ids)
         # Normalize URLs on remaining listings

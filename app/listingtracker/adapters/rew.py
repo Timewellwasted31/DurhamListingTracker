@@ -1,115 +1,88 @@
-"""Adapter for rew.ca listings."""
+"""Reader for rew.ca listing pages.
+
+REW labels its header with data fields (data-listing-city='Oshawa', data-listing-num-bedrooms='2',
+data-listing-sqft='1400 - 1598') and lays out the rest as <section><div>Label</div><div>Value</div>
+</section>. Its structured data calls the neighbourhood the "addressLocality", so the town comes
+from the header instead. REW has no sold prices or listing history for Ontario.
+"""
 
 from __future__ import annotations
 
 import re
-import json
 import logging
 from typing import Optional
+from urllib.parse import urlparse
 
-from listingtracker.adapters.base import UNIT_PATTERN, SiteAdapter
+from listingtracker.adapters.base import (
+    SiteAdapter, money, page_text, property_kind, split_unit, sqft_range,
+)
 from listingtracker.models import Status
 
 logger = logging.getLogger(__name__)
+
+_STATUSES = {"for sale": Status.FOR_SALE, "sold": Status.SOLD, "for rent": Status.FOR_SALE,
+             "for lease": Status.FOR_SALE, "leased": Status.SOLD}
 
 
 class RewAdapter(SiteAdapter):
     site_name = "rew.ca"
     domain_pattern = r"rew\.ca"
 
+    @classmethod
+    def is_listing_url(cls, url: str) -> bool:
+        """/properties/{unit-}{street address}-{town}-on, but not /properties/areas/..."""
+        parts = urlparse(url).path.strip("/").split("/")
+        return len(parts) == 2 and parts[0] == "properties" and bool(re.match(r"[a-z]{0,3}\d", parts[1]))
+
     def parse(self, html: str, url: str = "") -> dict:
         errors = []
-        result = {}
+        result: dict = {}
+        facts: dict[str, str] = {}
+        for k, v in re.findall(r"<section><div>([^<]{1,60})</div>(.*?)</section>", html, re.S):
+            facts.setdefault(page_text(k).lower(), page_text(v).replace("Get Pre-Approved", "").strip())
+        title = page_text(self._rx(html, r"<title>(.*?)</title>") or "")
 
-        ld = self._extract_ld_json(html)
-
-        result["address"] = (
-            ld.get("address", {}).get("streetAddress", "")
-            if ld else self._rx(html, r'"streetAddress"\s*:\s*"([^"]+)"', "")
-        )
+        # data-listing-address='1003-900 Wilson Road N, Oshawa ON, L1G 7T2'
+        full = page_text(self._rx(html, r"data-listing-address='([^']*)'") or "")
+        street = full.split(",")[0] if full else (self._rx(html, r'"streetAddress"\s*:\s*"([^"]+)"') or "")
+        result["unit"], result["address"] = split_unit(street)
         if not result["address"]:
-            m = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
-            result["address"] = m.group(1).strip() if m else ""
-            if not result["address"]:
-                errors.append("parse failed for rew.ca: address")
-
-        result["city"] = (
-            ld.get("address", {}).get("addressLocality", "")
-            if ld else self._rx(html, r'"addressLocality"\s*:\s*"([^"]+)"', "")
-        )
+            errors.append("parse failed for rew.ca: address")
+        result["city"] = page_text(self._rx(html, r"data-listing-city='([^']*)'") or "")
         if not result["city"]:
             errors.append("parse failed for rew.ca: city")
-
-        result["unit"] = self._rx(html, UNIT_PATTERN)
+        result["neighbourhood"] = (page_text(self._rx(html, r"data-listing-neighborhood='([^']*)'") or "")
+                                   or facts.get("community"))
         result["building_name"] = None
-        result["neighbourhood"] = self._rx(html, r'"neighborhood"\s*:\s*"([^"]+)"')
-        result["mls_number"] = self._rx(html, r'MLS[®#:\s]*([A-Z]\d{7,})')
-        result["status"] = self._extract_status(html, errors)
-        result["list_price"] = self._extract_price(html, ld, errors)
-        result["maintenance_fee"] = self._safe_float(
-            self._rx(html, r'(?:Maintenance|Strata|Condo)\s*Fee[^$]*\$([\d,]+(?:\.\d{2})?)')
-        )
-        result["taxes_annual"] = self._safe_float(
-            self._rx(html, r'(?:Property\s*)?Tax(?:es)?[^$]*\$([\d,]+(?:\.\d{2})?)')
-        )
-        result["beds"] = self._safe_int(self._rx(html, r'(\d+)\s*[Bb]ed'))
-        result["baths"] = self._safe_int(self._rx(html, r'(\d+)\s*[Bb]ath'))
-        sqft = self._extract_sqft(html)
-        result["sqft_min"] = sqft[0]
-        result["sqft_max"] = sqft[1]
-        result["parking"] = self._sanitize_field(
-            self._rx(html, r'Parking[^:]*:\s*([^<\n]{1,80})'))
-        result["locker"] = self._sanitize_field(
-            self._rx(html, r'Locker\s*:?\s*(Yes|No|Owned|[^<\n]{1,50})'))
-        result["balcony"] = self._sanitize_field(
-            self._rx(html, r'Balcony\s*:?\s*([^<\n]{1,50})'))
-        result["exposure"] = self._rx(html, r'(?:Exposure|Facing)\s*:?\s*([NSEW][^<\n]{0,20})')
-        result["days_on_market"] = self._safe_int(
-            self._rx(html, r'(\d+)\s*(?:days?\s*on\s*market|DOM)')
-        )
-        result["broker"] = self._rx(html, r'(?:Listed by|Brokerage)\s*:?\s*([^<\n]{3,80})')
-        result["fee_includes"] = self._rx(html, r'(?:Fee\s*Includes?)\s*:?\s*([^<\n]{3,200})')
-        result["site_estimate"] = None
-        if self._detect_power_of_sale(html):
+
+        # "For Sale: 1003-900 Wilson Road N, Oshawa, ON - REW"
+        status_word = (self._rx(title, r"^([A-Za-z ]+):") or "").lower()
+        result["status"] = _STATUSES.get(status_word, Status.UNKNOWN).value
+        if status_word in ("for rent", "for lease", "leased"):
+            result["is_rental"] = True
+        result["list_price"] = money(facts.get("list price") or self._rx(html, r"class='scrolledmenu-title'>([^<]+)<"))
+        if result["list_price"] is None:
+            errors.append("parse failed for rew.ca: list_price")
+
+        result["mls_number"] = next((v for k, v in facts.items() if k.startswith("mls")), None)
+        result["beds"] = self._safe_int(self._rx(html, r"data-listing-num-bedrooms='(\d+)"))
+        result["baths"] = self._safe_int(self._rx(html, r"data-listing-num-bathrooms='(\d+)"))
+        result["sqft_min"], result["sqft_max"] = sqft_range(self._rx(html, r"data-listing-sqft='([^']*)'"))
+        result["property_type"] = property_kind(facts.get("property type"), facts.get("title", ""))
+        result["taxes_annual"] = money(next((v for k, v in facts.items() if k.startswith("gross taxes")), None))
+        result["maintenance_fee"] = money(next((v for k, v in facts.items() if "maintenance fee" in k), None))
+        spaces = self._safe_int(self._rx(facts.get("parking spaces") or "", r"(\d+)"))
+        result["parking"] = (f"{spaces} space" + ("s" if spaces != 1 else "")) if spaces else None
+        result["broker"] = facts.get("primary broker")
+        result["days_on_market"] = self._safe_int(self._rx(facts.get("days on rew") or "", r"(\d+)"))
+        features = " ".join(v for k, v in facts.items() if "feature" in k or "amenit" in k).lower()
+        if "in suite laundry" in features or "ensuite laundry" in features:
+            result["ensuite_laundry"] = "Yes"
+        if self._detect_power_of_sale(page_text(self._rx(html, r"About this home(.*?)Listed by") or "")):
             result["power_of_sale"] = True
         result["parse_errors"] = "; ".join(errors) if errors else None
         return result
 
-    def _extract_ld_json(self, html: str) -> Optional[dict]:
-        for m in re.finditer(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', html, re.DOTALL):
-            try:
-                data = json.loads(m.group(1))
-                if isinstance(data, dict) and "address" in data:
-                    return data
-                if isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict) and "address" in item:
-                            return item
-            except (json.JSONDecodeError, ValueError):
-                pass
-        return None
-
-    def _extract_status(self, html: str, errors: list) -> str:
-        if re.search(r'(?:sold|closed)', html[:10000], re.IGNORECASE):
-            return Status.SOLD.value
-        if re.search(r'\$[\d,]+', html):
-            return Status.FOR_SALE.value
-        errors.append("parse failed for rew.ca: status")
-        return Status.UNKNOWN.value
-
-    def _extract_price(self, html: str, ld: Optional[dict], errors: list) -> Optional[float]:
-        if ld and "price" in ld:
-            p = self._safe_price(str(ld["price"]))
-            if p:
-                return p
-        for p in [
-            r'"price"\s*:\s*"?\$?([\d,]+)"?',
-            r'class="[^"]*price[^"]*"[^>]*>\s*\$?([\d,]+)',
-            r'(?:Asking|Price)\s*:?\s*\$?([\d,]+)',
-        ]:
-            m = re.search(p, html, re.IGNORECASE)
-            if m:
-                return self._safe_price(m.group(1))
-        errors.append("parse failed for rew.ca: list_price")
-        return None
-
+    def _rx(self, text: str, pattern: str, default=None) -> Optional[str]:
+        m = re.search(pattern, text or "", re.IGNORECASE | re.S)
+        return m.group(1).strip() if m else default

@@ -19,10 +19,9 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 
 from listingtracker.paths import (
-    ensure_directories, use_installed_browsers, LOGS_DIR, MPL_CACHE_DIR, DB_PATH,
+    ensure_directories, LOGS_DIR, MPL_CACHE_DIR, DB_PATH,
 )
 
-use_installed_browsers()
 os.environ["MPLCONFIGDIR"] = str(MPL_CACHE_DIR)
 
 LOCK_PATH = DB_PATH.parent / "server.lock"
@@ -104,9 +103,7 @@ def run_check(logger: logging.Logger) -> None:
 
     snaps, changes = fetch_all(
         favorites,
-        headless=True,
         progress_callback=on_progress,
-        show_browser=False,
     )
 
     removed = cleanup_bad_listings(after_fetch=True)

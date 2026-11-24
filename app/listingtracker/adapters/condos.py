@@ -50,6 +50,14 @@ class CondosAdapter(SiteAdapter):
             html, errors, None,
             r'MLS[®#:\s]*([A-Z]\d{7,})',
         )
+        # Condos.ca lists rentals beside sales; a rental's title gives a monthly rent ("$1,100/mo")
+        title = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
+        if title and re.search(r"\$[\d,]+\s*/\s*mo\b", title.group(1)):
+            result["is_rental"] = True
+        if not result["mls_number"]:
+            # The page only writes it in with a script; the listing's address ends with it
+            m = re.search(r"-([A-Z]\d{7,})/?$", url or "")
+            result["mls_number"] = m.group(1) if m else None
         result["status"] = self._extract_status(html, errors)
         result["list_price"] = self._extract_price_val(html, errors)
         result["maintenance_fee"] = self._safe_float(
