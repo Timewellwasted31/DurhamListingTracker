@@ -188,7 +188,20 @@ public class PairActivity extends AppCompatActivity {
         if (trigger != null) setBusy(trigger, true);
 
         executor.execute(() -> {
-            ServerLink.Reached reached = ServerLink.firstReachable(urls, apiKey, fp);
+            ServerLink.Reached first = ServerLink.firstReachable(this, urls, apiKey, fp);
+            if (first == null) {
+                // The internet provider may have changed the home's address: on the home Wi-Fi the
+                // router can say what it is now
+                List<String> fresh = RouterLookup.newAddresses(this, urls);
+                if (!fresh.isEmpty()) first = ServerLink.firstReachable(this, fresh, apiKey, fp);
+            }
+            final ServerLink.Reached reached = first;
+            if (reached != null) {
+                // Whatever went wrong while it was out of reach goes to the computer now
+                android.content.Context app = getApplicationContext();
+                new Thread(() -> ConnectionProblems.send(app, reached.url, apiKey, fp),
+                        "send-problems").start();
+            }
 
             runOnUiThread(() -> {
                 if (isDestroyed()) return;

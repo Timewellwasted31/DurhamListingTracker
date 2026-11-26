@@ -700,7 +700,7 @@ async function apiFetch(path, opts = {}) {
       const resp = await fetch(serverUrl.replace(/\/+$/, '') + path, {
         ...opts,
         signal: controller.signal,
-        headers: { ...(opts.headers || {}), 'X-API-Key': apiKey, 'X-Request-Id': requestId },
+        headers: { ...(opts.headers || {}), 'X-API-Key': apiKey, 'X-Request-Id': requestId, ...phoneHeaders() },
       });
       if (!resp.ok) throw new ApiError(resp.status);
       const data = await resp.json();
@@ -731,6 +731,23 @@ const PROBLEMS_KEY = 'dlt_problems';
 const PROBLEMS_KEPT = 200;
 let sendingProblems = false;
 
+// How the phone is connected and its own addresses (e.g. "wifi 192.168.2.45"), from the Android
+// app; sent with each request so the computer can log every connection it gets. Asked at most
+// every 15 s. Empty in a plain browser.
+let phoneNet = { at: 0, value: '' };
+function phoneNetwork() {
+  if (Date.now() - phoneNet.at > 15000) {
+    let value = '';
+    try { if (window.AndroidApp && AndroidApp.network) value = String(AndroidApp.network() || ''); } catch(e) {}
+    phoneNet = { at: Date.now(), value: value.replace(/[^ -~]/g, '').slice(0, 200) };
+  }
+  return phoneNet.value;
+}
+function phoneHeaders() {
+  const net = phoneNetwork();
+  return net ? { 'X-Phone-Network': net } : {};
+}
+
 function newId() {
   return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
 }
@@ -750,7 +767,7 @@ function logProblem(entry) {
   const list = readProblems();
   list.push({
     id: newId(), at: new Date().toISOString(), online: navigator.onLine,
-    network: c.type || c.effectiveType || undefined, rtt: c.rtt, downlink: c.downlink,
+    network: phoneNetwork() || c.type || c.effectiveType || undefined, rtt: c.rtt, downlink: c.downlink,
     visible: document.visibilityState, server, ...entry,
   });
   writeProblems(list);
@@ -767,7 +784,7 @@ async function sendProblems() {
     // Plain fetch, not apiFetch: a failure here is not itself worth reporting
     const resp = await fetch(serverUrl.replace(/\/+$/, '') + '/api/client-errors', {
       method: 'POST', signal: controller.signal,
-      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey, ...phoneHeaders() },
       body: JSON.stringify({ errors: list, agent: navigator.userAgent }),
     });
     if (resp.ok) {
@@ -1015,7 +1032,9 @@ function renderListings() {
             <button class="card-fav ${l.favorited ? 'active' : ''}" id="fav-${l.id}" onclick="event.stopPropagation(); toggleFav(${l.id})">${l.favorited ? '&#9733;' : '&#9734;'}</button>
           </div>
           <div class="card-meta">${meta || escHtml(l.city || l.site)}</div>
-          <div class="card-price ${st.sold ? 'sold' : ''}">${l.price ? formatPrice(l.price) : 'No price'}${boughtTag(l.bought, l.bought_est)}</div>
+          <div class="card-price ${st.sold ? 'sold' : ''}">${l.sold
+            ? formatPrice(l.sold[1]) + `<span class="bought">Sold ${formatDate(l.sold[0])}</span>`
+            : (l.price ? formatPrice(l.price) : 'No price') + boughtTag(l.bought, l.bought_est)}</div>
           <div class="card-badges">
             <span class="badge ${st.cls}">${st.label}</span>
             ${qualBadge(l)}
@@ -1160,6 +1179,7 @@ function renderDetail() {
     ['Outdoor', snap.outdoor_space],
     ['Possession', snap.possession_date],
     ['Listed', formatDate(d.list_date)],
+    ['Sold', d.sold && formatDate(d.sold[0])],
     ['Days on Market', d.days_on_market],
     ['Broker', snap.broker],
     ['Site Estimate', snap.site_estimate && formatPrice(snap.site_estimate)],
@@ -1209,10 +1229,12 @@ function renderDetail() {
     ${galleryHtml}
     <div class="detail-content">
       <div class="detail-price ${st.sold ? 'sold' : ''}">
-        ${snap.list_price ? formatPrice(snap.list_price) : 'No price'}
+        ${d.sold ? formatPrice(d.sold[1]) : snap.list_price ? formatPrice(snap.list_price) : 'No price'}
         <span class="detail-status-badge badge ${st.cls}">${st.label}</span>
       </div>
-      ${boughtLine(d.bought, snap.list_price, d.bought_estimate)}
+      ${soldLine(d.sold, snap.list_price)}
+      ${d.sold ? boughtLine(d.bought, d.sold[1], d.bought_estimate, 'sold')
+               : boughtLine(d.bought, snap.list_price, d.bought_estimate)}
       <div style="color: var(--text2); margin-top:4px; font-size:14px">${place}</div>
       ${d.mls_number ? `<div style="color:var(--text2); font-size:12px; margin-top:2px">MLS# ${escHtml(d.mls_number)}</div>` : ''}
 
@@ -1344,14 +1366,21 @@ function boughtTag(b, est) {
   return '';
 }
 
-function askingVsPaid(asking, paid) {
-  return asking ? ` &middot; asking <span class="${asking < paid ? 'down' : 'up'}">${signedMoney(asking - paid)} (${pct(asking - paid, paid)})</span>` : '';
+// What the listing sold for against what it asked
+function soldLine(sold, asking) {
+  if (!sold) return '';
+  const diff = asking ? ` <span class="${sold[1] < asking ? 'down' : 'up'}">(${signedMoney(sold[1] - asking)}, ${sold[1] < asking ? '&minus;' : '+'}${pct(sold[1] - asking, asking)})</span>` : '';
+  return `<div class="bought-detail">Sold on ${formatDate(sold[0])}${asking ? ` &middot; asked ${formatPrice(asking)}` + diff : ''}</div>`;
 }
 
-function boughtLine(b, asking, est) {
-  if (b) return `<div class="bought-detail">Seller bought it for ${formatPrice(b[1])} on ${formatDate(b[0])}${askingVsPaid(asking, b[1])}</div>`;
+function askingVsPaid(asking, paid, label = 'asking') {
+  return asking ? ` &middot; ${label} <span class="${asking < paid ? 'down' : 'up'}">${signedMoney(asking - paid)} (${pct(asking - paid, paid)})</span>` : '';
+}
+
+function boughtLine(b, asking, est, label) {
+  if (b) return `<div class="bought-detail">Seller bought it for ${formatPrice(b[1])} on ${formatDate(b[0])}${askingVsPaid(asking, b[1], label)}</div>`;
   if (!est) return '';
-  return `<div class="bought-detail">Estimate: seller likely paid about ${formatPrice(est.price)} in ~${est.year}${askingVsPaid(asking, est.price)}
+  return `<div class="bought-detail">Estimate: seller likely paid about ${formatPrice(est.price)} in ~${est.year}${askingVsPaid(asking, est.price, label)}
     <div style="font-size:11px; opacity:.8; margin-top:2px">No sale on record. ${escHtml(est.year_basis)}; valued from ${est.comparables} sales of ${escHtml(est.scope)}, adjusted with Durham's price index.${est.type_basis ? ' ' + escHtml(est.type_basis) + '.' : ''}</div></div>`;
 }
 

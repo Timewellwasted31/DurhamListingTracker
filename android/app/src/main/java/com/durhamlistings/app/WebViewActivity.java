@@ -22,6 +22,8 @@ public class WebViewActivity extends AppCompatActivity {
     private WebView webView;
     private SwipeRefreshLayout swipeRefresh;
     private String serverUrl;
+    // The page showing now, kept for the bridge's calls, which arrive off the main thread
+    private volatile String pageUrl = "";
     private String apiKey;
     private String certFp;
     private AppUpdater updater;
@@ -74,7 +76,13 @@ public class WebViewActivity extends AppCompatActivity {
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                pageUrl = url == null ? "" : url;
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
+                pageUrl = url == null ? "" : url;
                 swipeRefresh.setRefreshing(false);
             }
 
@@ -95,6 +103,8 @@ public class WebViewActivity extends AppCompatActivity {
                 int code = error.getErrorCode();
                 if (request.isForMainFrame() && (code == ERROR_CONNECT || code == ERROR_TIMEOUT ||
                         code == ERROR_HOST_LOOKUP)) {
+                    ConnectionProblems.add(WebViewActivity.this, serverUrl, "page",
+                            "the listings page didn't load: " + error.getDescription(), -1, null);
                     Intent intent = new Intent(WebViewActivity.this, PairActivity.class);
                     intent.putExtra(PairActivity.EXTRA_CONNECTION_LOST, true);
                     startActivity(intent);
@@ -109,6 +119,13 @@ public class WebViewActivity extends AppCompatActivity {
 
     /** Actions the page's connection menu hands to the app, which owns the saved pairing. */
     private final class AppBridge {
+        /** How the phone is connected and its own addresses, sent with the page's requests so
+         *  the computer can log where each connection came from. Only for the server's page. */
+        @JavascriptInterface
+        public String network() {
+            return pageUrl.startsWith(serverUrl + "/") ? ConnectionProblems.network(WebViewActivity.this) : "";
+        }
+
         @JavascriptInterface
         public void reconnect() {
             runOnUiThread(() -> {

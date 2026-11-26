@@ -5,6 +5,7 @@ import android.content.Context;
 import android.net.http.SslCertificate;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.webkit.WebStorage;
 
 import androidx.appcompat.app.AlertDialog;
@@ -58,25 +59,60 @@ final class ServerLink {
 
     private ServerLink() {}
 
-    /** Tries every address at once and returns the first that accepts the key, or null. */
-    static Reached firstReachable(List<String> urls, String apiKey, String fingerprint) {
+    /**
+     * Tries every address at once and returns the first that accepts the key, or null. Each
+     * address that fails is kept as a problem to report (see ConnectionProblems); one still
+     * trying when another answers is not.
+     */
+    static Reached firstReachable(Context context, List<String> urls, String apiKey, String fingerprint) {
         if (urls.isEmpty()) return null;
         List<Callable<Reached>> attempts = new ArrayList<>();
+        String network = ConnectionProblems.network(context);
         for (String url : urls) {
-            attempts.add(() -> check(url, apiKey, fingerprint));
+            attempts.add(() -> {
+                long started = SystemClock.elapsedRealtime();
+                String requestId = java.util.UUID.randomUUID().toString();
+                try {
+                    return check(url, apiKey, fingerprint, requestId, network);
+                } catch (Exception e) {
+                    if (!Thread.currentThread().isInterrupted()) {
+                        ConnectionProblems.add(context, url, "connect", describe(e),
+                                SystemClock.elapsedRealtime() - started, requestId);
+                    }
+                    throw e;
+                }
+            });
         }
         ExecutorService pool = Executors.newFixedThreadPool(attempts.size());
         try {
             return pool.invokeAny(attempts, 10, TimeUnit.SECONDS);
         } catch (Exception e) {
+            ConnectionProblems.add(context, null, "unreachable",
+                    "none of the " + urls.size() + " saved addresses answered within 10 s", -1, null);
             return null;
         } finally {
             pool.shutdownNow();
         }
     }
 
-    private static Reached check(String url, String apiKey, String fingerprint) throws Exception {
+    /** A failure in words: what kind it was (timeout, refused, certificate…) and its detail. */
+    static String describe(Throwable e) {
+        String text = e.getClass().getSimpleName();
+        if (e.getMessage() != null) text += ": " + e.getMessage();
+        Throwable cause = e.getCause();
+        if (cause != null && cause != e && cause.getMessage() != null) {
+            text += " (" + cause.getClass().getSimpleName() + ": " + cause.getMessage() + ")";
+        }
+        return text;
+    }
+
+    private static Reached check(String url, String apiKey, String fingerprint, String requestId,
+                                 String network) throws Exception {
         HttpURLConnection conn = get(url + "/api/key-check", apiKey, fingerprint);
+        // Lets the computer tell a failed attempt that reached it from one that never did
+        conn.setRequestProperty("X-Request-Id", requestId);
+        // and log the phone's own address for each connection it gets
+        conn.setRequestProperty("X-Phone-Network", network);
         try {
             conn.setReadTimeout(6000);
             if (conn.getResponseCode() != 200) throw new Exception("HTTP " + conn.getResponseCode());

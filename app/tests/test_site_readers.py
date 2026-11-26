@@ -298,3 +298,16 @@ def test_strata_takes_the_unit_from_the_address_when_the_page_leaves_it_out():
     r = StrataAdapter().parse("<html><body>" + "x" * 3000 + "</body></html>",
                               url="https://strata.ca/ajax/1-120-wilkie-ln-carruthers-forest/105-unit-105")
     assert r["unit"] == "105"
+
+
+def test_zolo_keeps_the_listings_own_sale():
+    from listingtracker.adapters.zolo import ZoloAdapter
+    html = """<section id="sold-history"><table>
+<tr class="table-entry"><td class="table-mls sm-col-3">E14200430</td><td class="table-date nowrap">Nov 20, 2026</td><td class="table-event">Sold</td><td class="table-price">$440,000</td></tr>
+<tr class="table-entry"><td class="table-mls sm-col-3"></td><td class="table-date nowrap">Nov 1, 2026</td><td class="table-event">Listed</td><td class="table-price">$449,000</td></tr>
+<tr class="table-entry"><td class="table-mls sm-col-3">E9000001</td><td class="table-date nowrap">Mar 3, 2021</td><td class="table-event">Sold</td><td class="table-price">$361,000</td></tr>
+</table></section>"""
+    result = {"mls_number": "E14200430"}
+    ZoloAdapter._history(html, result)
+    assert result["past_sales"] == [("2021-03-03", 361000.0), ("2026-11-20", 440000.0)]
+    assert result["price_history"] == [("2026-11-01", 449000.0)]

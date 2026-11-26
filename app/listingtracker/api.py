@@ -52,7 +52,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["GET", "POST"],
-    allow_headers=["X-API-Key", "X-Request-Id", "Content-Type"],
+    allow_headers=["X-API-Key", "X-Request-Id", "X-Phone-Network", "Content-Type"],
 )
 
 
@@ -62,6 +62,9 @@ async def remember_phone_requests(request: Request, call_next):
     one that never got here from one this end answered badly (see phonelog)."""
     from listingtracker import phonelog
     rid = request.headers.get("x-request-id")
+    if rid or request.headers.get("x-api-key") or request.headers.get("x-phone-network"):
+        phonelog.connection(request.client.host if request.client else None,
+                            request.headers.get("host"), request.headers.get("x-phone-network"))
     started = time.monotonic()
     status = 500
     try:
@@ -129,7 +132,7 @@ def list_listings(_=Depends(verify_api_key)):
         get_all_listings, get_all_latest_snapshots, get_first_image_urls, get_past_sales,
         get_price_histories,
     )
-    from listingtracker.pricehistory import last_purchase
+    from listingtracker.pricehistory import last_purchase, own_sale
     from listingtracker import purchaseprice
 
     snapshots = get_all_latest_snapshots()
@@ -145,7 +148,8 @@ def list_listings(_=Depends(verify_api_key)):
         snap = snapshots.get(lst.id)
         bought = last_purchase(sales.get(lst.id, []), list_dates.get(lst.id))
         est = None if bought else purchaseprice.estimate(purchaseprice.home_for(lst, snap, guesser), pool)
-        card = _summary(lst, snap, images.get(lst.id), bought, est)
+        card = _summary(lst, snap, images.get(lst.id), bought, est,
+                        own_sale(sales.get(lst.id, []), list_dates.get(lst.id), snap.status) if snap else None)
         card.update(_compact(_money(snap, cfg)))
         cards.append(card)
     return {"listings": cards, "buyer": _buyer_summary(cfg, profile)}
@@ -202,7 +206,7 @@ def _affordability(snap, cfg, profile) -> dict | None:
     return _compact(out) or None
 
 
-def _summary(lst, snap, image_url, bought, estimate=None) -> dict:
+def _summary(lst, snap, image_url, bought, estimate=None, sold=None) -> dict:
     card = {
         "id": lst.id,
         "address": lst.address or "Unknown",
@@ -215,6 +219,7 @@ def _summary(lst, snap, image_url, bought, estimate=None) -> dict:
         "bought": list(bought) if bought else None,  # [date, price] the seller likely paid
         # [year, price] estimated from similar sales, when no purchase is on record
         "bought_est": [estimate.year, estimate.price] if estimate else None,
+        "sold": list(sold) if sold else None,  # [date, price] this listing sold for
     }
     if snap:
         card.update(
@@ -259,6 +264,7 @@ def get_listing(listing_id: int, _=Depends(verify_api_key)):
         "next_drop": prices.forecast.to_dict() if prices.forecast else None,
         "past_sales": [list(s) for s in prices.past_sales] or None,
         "bought": list(prices.bought) if prices.bought else None,
+        "sold": list(prices.sold) if prices.sold else None,
         "bought_estimate": estimate.to_dict() if estimate else None,
         "affordability": _affordability(snap, *_buyer()),
         "building_sales": _building_sales(lst, snap),

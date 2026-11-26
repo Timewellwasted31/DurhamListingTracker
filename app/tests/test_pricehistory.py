@@ -176,3 +176,16 @@ def test_price_history_round_trip_and_cleanup(temp_db):
 
     db.delete_listing(lid)
     assert db.get_price_histories() == {}
+
+
+def test_own_sale_is_the_sale_after_listing_once_sold():
+    from listingtracker.pricehistory import own_sale, last_purchase
+    from listingtracker.models import Status
+    sales = [("2013-04-08", 162000.0), ("2026-11-24", 321000.0)]
+    assert own_sale(sales, "2026-11-05", Status.SOLD) == ("2026-11-24", 321000.0)
+    assert own_sale(sales, "2026-11-05", "SOLD") == ("2026-11-24", 321000.0)
+    assert last_purchase(sales, "2026-11-05") == ("2013-04-08", 162000.0)
+    assert own_sale(sales, "2026-11-05", Status.FOR_SALE) is None  # not sold (yet)
+    assert own_sale(sales, "2026-11-05", Status.SOLD_CONDITIONAL) is None  # no final price
+    assert own_sale(sales[:1], "2026-11-05", Status.SOLD) is None  # sale not published yet
+    assert own_sale(sales, None, Status.SOLD) is None  # can't tell it from an earlier sale

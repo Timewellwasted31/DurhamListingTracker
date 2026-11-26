@@ -239,6 +239,7 @@ class PriceSummary:
     forecast: Optional[DropForecast]
     past_sales: list[tuple[str, float]]
     bought: Optional[tuple[str, float]]  # what the current owner likely paid
+    sold: Optional[tuple[str, float]] = None  # (date, price) this listing sold for, once it has
 
 
 def last_purchase(sales: list[tuple[str, float]], list_date: Optional[str]) -> Optional[tuple[str, float]]:
@@ -246,6 +247,16 @@ def last_purchase(sales: list[tuple[str, float]], list_date: Optional[str]) -> O
     began. A sale on or after the list date is this listing's own, not the seller's purchase."""
     before = [s for s in sales if not list_date or s[0] < list_date]
     return before[-1] if before else None
+
+
+def own_sale(sales: list[tuple[str, float]], list_date: Optional[str], status) -> Optional[tuple[str, float]]:
+    """The sale that ended this listing, as (date, price): the latest sale on or after the day it
+    was listed, once the listing shows as sold. Without a list date there is no telling this
+    listing's sale from an earlier one, so none is given."""
+    if not list_date or Status.normalize(getattr(status, "value", status) or "") != Status.SOLD:
+        return None
+    after = [s for s in sales if s[0] >= list_date]
+    return after[-1] if after else None
 
 
 def market_pattern() -> MarketPattern:
@@ -265,4 +276,5 @@ def summarize(listing_id: int, snapshots: list[Snapshot], market: Optional[Marke
     fc = forecast(points, snap.status, market or market_pattern()) if snap else None
     sales = get_past_sales(listing_id).get(listing_id, [])
     return PriceSummary(list_date, points, days_on_market(list_date, snap), fc,
-                        sales, last_purchase(sales, list_date))
+                        sales, last_purchase(sales, list_date),
+                        own_sale(sales, list_date, snap.status) if snap else None)

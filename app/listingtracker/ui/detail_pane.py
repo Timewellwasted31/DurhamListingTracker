@@ -647,7 +647,17 @@ class DetailPane(QWidget):
             self.status_label.setText('<span style="color:#666;">No data yet</span>')
 
         # Price hero
-        if snap and snap.list_price:
+        sold = self._prices.sold
+        if snap and sold:
+            # A sold listing leads with what it sold for, and when, beside what it asked
+            day = date.fromisoformat(sold[0][:10])
+            when = f"{day:%b} {day.day}, {day.year}"
+            asked = f" · asked ${snap.list_price:,.0f}" if snap.list_price else ""
+            self.price_hero.setText(
+                f"${sold[1]:,.0f}&nbsp;&nbsp;<span style=\"font-size:12px; font-weight:normal; color:#999;\">"
+                f"Sold {when}{asked}</span>")
+            self.price_hero.setVisible(True)
+        elif snap and snap.list_price:
             hero = f"${snap.list_price:,.0f}"
             # What the seller likely paid, in smaller text beside it: their recorded purchase, or
             # an estimate from similar homes' sales when there is none

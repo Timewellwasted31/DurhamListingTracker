@@ -123,6 +123,24 @@ def lan_ip() -> str:
         s.close()
 
 
+def other_home_ips() -> list[str]:
+    """This machine's other home-network addresses besides lan_ip(): above all the one on the
+    Mobile hotspot it may be running (192.168.137.1), where a phone on that hotspot reaches it.
+    A phone tries every address at once, so one it can't use costs nothing."""
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return []
+    main, out = lan_ip(), []
+    for info in infos:
+        addr = info[4][0]
+        ip = ipaddress.ip_address(addr)
+        if (addr != main and addr not in out and ip.is_private and not ip.is_loopback
+                and not ip.is_link_local and ip not in _TAILSCALE_NET):
+            out.append(addr)
+    return out
+
+
 def tailscale_ip() -> Optional[str]:
     try:
         infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
@@ -349,6 +367,7 @@ class RemoteAccess:
         if ts:
             out.append(f"https://{ts}:{self.port}")
         out.append(f"https://{lan_ip()}:{self.port}")
+        out += [f"https://{addr}:{self.port}" for addr in other_home_ips()]
         return out
 
     def _run(self) -> None:

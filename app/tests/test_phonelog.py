@@ -58,3 +58,34 @@ def test_only_the_most_recent_request_ids_are_remembered(log, monkeypatch):
     for i in range(5):
         phonelog.remember(f"r{i}", "/api/listings", 200, 5)
     assert list(phonelog._seen) == ["r2", "r3", "r4"]
+
+
+
+@pytest.fixture
+def connections(tmp_path, monkeypatch):
+    monkeypatch.setattr(phonelog, "LOGS_DIR", tmp_path)
+    monkeypatch.setattr(phonelog, "CONNECTIONS_LOG", tmp_path / "phone-connections.log")
+    monkeypatch.setattr(phonelog, "CONNECTIONS_PATH", tmp_path / "phone-connections.json")
+    monkeypatch.setattr(phonelog, "_connections", None)
+    monkeypatch.setattr(phonelog, "_current", None)
+    monkeypatch.setattr(phonelog, "_phone_at", {})
+    return tmp_path
+
+
+def test_each_change_of_phone_address_or_route_is_logged_and_every_connection_tallied(connections):
+    import json
+    phonelog.connection("203.0.113.7", "203.0.113.7:8443", "wifi, wifi 192.168.1.45")
+    phonelog.connection("203.0.113.7", "203.0.113.7:8443", None)  # the page itself: same phone
+    phonelog.connection("203.0.113.7", "203.0.113.7:8443", "wifi, wifi 192.168.1.45")
+    phonelog.connection("127.0.0.1", "127.0.0.1:8000", None)  # this computer: not the phone
+    phonelog.connection("198.51.100.5", "durham.duckdns.org:8443", "mobile data, mobile 10.20.30.40")
+    phonelog.connection("203.0.113.7", "203.0.113.7:8443", "wifi, wifi 192.168.1.45")
+
+    lines = (connections / "phone-connections.log").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3  # first connection, the move to mobile data, and back
+    assert "phone wifi, wifi 192.168.1.45" in lines[0] and "from 203.0.113.7" in lines[0]
+    assert "first time" in lines[0] and "via durham.duckdns.org:8443" in lines[1]
+    assert "seen before: 3 requests" in lines[2] and "2 different connections so far" in lines[2]
+
+    tally = json.loads((connections / "phone-connections.json").read_text(encoding="utf-8"))
+    assert sorted(e["requests"] for e in tally.values()) == [1, 4]

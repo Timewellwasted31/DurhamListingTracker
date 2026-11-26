@@ -7,10 +7,16 @@ whether the failed request ever reached the computer (a network problem) or did,
 computer answered (a problem here).
 
 Reports go to logs/phone-errors.log, one line each, newest last.
+
+Every connection the phone makes is noted too (see `connection`): where it reached the computer
+from, which of the computer's addresses it used, and the phone's own network and address as it
+reports them. logs/phone-connections.log gets a line each time that combination changes, and
+logs/phone-connections.json keeps a tally of every combination seen, with the number of requests.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -36,6 +42,74 @@ FIELDS = {  # what a report may carry, and its type
     "attempt": int, "of": int, "ms": int, "request_id": str, "online": bool, "network": str,
     "rtt": int, "downlink": float, "visible": str, "server": str, "source": str,
 }
+
+
+CONNECTIONS_LOG = LOGS_DIR / "phone-connections.log"
+CONNECTIONS_PATH = LOGS_DIR / "phone-connections.json"
+SAVE_EVERY = 60  # seconds between tally saves while nothing changes
+_LOCAL = ("127.0.0.1", "::1", "localhost")
+
+_connections: Optional[dict] = None   # "source|route|phone" -> tally, loaded on first use
+_current: Optional[str] = None        # the combination of the latest request
+_phone_at: dict[str, str] = {}        # source -> what the phone last said about its network
+_saved_at = 0.0
+_connections_lock = threading.Lock()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def connection(source: Optional[str], route: Optional[str], phone: Optional[str]) -> None:
+    """Note one phone request: `source` is the address it came from, `route` the address of this
+    computer it was sent to (host:port), and `phone` the phone's own network and address as it
+    reports them. A request without that report (the page itself, an older app) is taken to come
+    from the phone last heard from at the same source. This computer's own requests are skipped."""
+    global _connections, _current, _saved_at
+    if not source or source in _LOCAL:
+        return
+    route = (route or "?")[:MAX_TEXT]
+    with _connections_lock:
+        if phone:
+            _phone_at[source] = phone = phone[:MAX_TEXT]
+        else:
+            phone = _phone_at.get(source, "not reported")
+        if _connections is None:
+            try:
+                _connections = json.loads(CONNECTIONS_PATH.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                _connections = {}
+        key = f"{source}|{route}|{phone}"
+        now = _now()
+        entry = _connections.get(key)
+        new = entry is None
+        if new:
+            entry = _connections[key] = {"source": source, "route": route, "phone": phone,
+                                         "first": now, "last": now, "requests": 0}
+        entry["last"] = now
+        entry["requests"] += 1
+        changed, _current = key != _current, key
+        if changed:
+            note = ("first time" if new else
+                    f"seen before: {entry['requests'] - 1} requests since {entry['first']}")
+            _append(CONNECTIONS_LOG, f"{now} | phone {phone} | reached this computer from {source} "
+                                     f"via {route} | {note} | {len(_connections)} different connections so far")
+        if changed or time.time() - _saved_at > SAVE_EVERY:
+            _saved_at = time.time()
+            try:
+                LOGS_DIR.mkdir(parents=True, exist_ok=True)
+                CONNECTIONS_PATH.write_text(json.dumps(_connections, indent=1), encoding="utf-8")
+            except OSError as e:
+                logger.warning("Couldn't write %s: %s", CONNECTIONS_PATH, e)
+
+
+def _append(path, line: str) -> None:
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError as e:
+        logger.warning("Couldn't write %s: %s", path, e)
 
 
 def remember(request_id: Optional[str], path: str, status: int, ms: int) -> None:

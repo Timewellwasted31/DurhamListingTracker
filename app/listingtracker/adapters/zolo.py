@@ -119,9 +119,10 @@ class ZoloAdapter(SiteAdapter):
 
     @staticmethod
     def _history(html: str, result: dict) -> None:
-        """The "Sold History" table: this listing's own events give its price history, and earlier
-        listings of the same home that sold give its past sales. Zolo masks the earlier ones
-        ("Xxx XX, XXXX") unless the person is signed in, and masked rows are skipped."""
+        """The "Sold History" table: this listing's own events give its price history, and every
+        sale of the home (earlier listings', and this one's once it has sold) its past sales.
+        Zolo masks the earlier ones ("Xxx XX, XXXX") unless the person is signed in, and masked
+        rows are skipped."""
         section = re.search(r'id="sold-history".*?</table>', html, re.S)
         if not section:
             return
@@ -139,8 +140,7 @@ class ZoloAdapter(SiteAdapter):
         if prices:
             result["price_history"] = prices
             result.setdefault("list_date", prices[0][0])
-        sold = sorted((when, price) for m, when, event, price in rows
-                      if price and event == "sold" and m != result.get("mls_number"))
+        sold = sorted((when, price) for _, when, event, price in rows if price and event == "sold")
         if sold:
             result["past_sales"] = sold
 

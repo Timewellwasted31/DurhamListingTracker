@@ -103,7 +103,8 @@ def street_names(address: str) -> list[str]:
     canonical = _STREET_TYPE_NORMALIZE.get(last, last)
     full_type = STREET_ABBREV_TO_FULL.get(canonical)
     if full_type and len(words) > 1:
-        return [" ".join(words[:-1] + [full_type]), written]
+        full = " ".join(words[:-1] + [full_type])
+        return [full] if full == written else [full, written]  # already written out in full
     return [written]
 
 
