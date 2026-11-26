@@ -50,6 +50,8 @@ _WAN_SERVICES = (
 _CONFLICT = 718
 _PERMANENT_LEASE_ONLY = 725
 _TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
+# Windows numbers its Mobile hotspot this way, always
+_HOTSPOT_NET = ipaddress.ip_network("192.168.137.0/24")
 
 
 # ---------------------------------------------------------------------------
@@ -123,22 +125,20 @@ def lan_ip() -> str:
         s.close()
 
 
-def other_home_ips() -> list[str]:
-    """This machine's other home-network addresses besides lan_ip(): above all the one on the
-    Mobile hotspot it may be running (192.168.137.1), where a phone on that hotspot reaches it.
-    A phone tries every address at once, so one it can't use costs nothing."""
+def hotspot_ip() -> Optional[str]:
+    """This machine's address on the Mobile hotspot it runs, if it runs one (192.168.137.1):
+    a phone on that hotspot reaches it there. Other adapters' addresses (VirtualBox, Hyper-V,
+    WSL) lead nowhere a phone can be, so they are never offered."""
     try:
         infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
     except OSError:
-        return []
-    main, out = lan_ip(), []
+        return None
+    main = lan_ip()
     for info in infos:
         addr = info[4][0]
-        ip = ipaddress.ip_address(addr)
-        if (addr != main and addr not in out and ip.is_private and not ip.is_loopback
-                and not ip.is_link_local and ip not in _TAILSCALE_NET):
-            out.append(addr)
-    return out
+        if addr != main and ipaddress.ip_address(addr) in _HOTSPOT_NET:
+            return addr
+    return None
 
 
 def tailscale_ip() -> Optional[str]:
@@ -367,7 +367,9 @@ class RemoteAccess:
         if ts:
             out.append(f"https://{ts}:{self.port}")
         out.append(f"https://{lan_ip()}:{self.port}")
-        out += [f"https://{addr}:{self.port}" for addr in other_home_ips()]
+        hotspot = hotspot_ip()
+        if hotspot:
+            out.append(f"https://{hotspot}:{self.port}")
         return out
 
     def _run(self) -> None:

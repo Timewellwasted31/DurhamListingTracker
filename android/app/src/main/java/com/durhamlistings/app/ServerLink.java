@@ -15,6 +15,8 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
+import java.net.SocketTimeoutException;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.MessageDigest;
@@ -27,6 +29,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
@@ -62,11 +65,12 @@ final class ServerLink {
     /**
      * Tries every address at once and returns the first that accepts the key, or null. Each
      * address that fails is kept as a problem to report (see ConnectionProblems); one still
-     * trying when another answers is not.
+     * trying when another answers is cancelled, and is not: it didn't fail.
      */
     static Reached firstReachable(Context context, List<String> urls, String apiKey, String fingerprint) {
         if (urls.isEmpty()) return null;
         List<Callable<Reached>> attempts = new ArrayList<>();
+        AtomicBoolean settled = new AtomicBoolean(false);  // an address answered, or time ran out
         String network = ConnectionProblems.network(context);
         for (String url : urls) {
             attempts.add(() -> {
@@ -75,7 +79,7 @@ final class ServerLink {
                 try {
                     return check(url, apiKey, fingerprint, requestId, network);
                 } catch (Exception e) {
-                    if (!Thread.currentThread().isInterrupted()) {
+                    if (!settled.get() && !cancelled(e)) {
                         ConnectionProblems.add(context, url, "connect", describe(e),
                                 SystemClock.elapsedRealtime() - started, requestId);
                     }
@@ -91,8 +95,16 @@ final class ServerLink {
                     "none of the " + urls.size() + " saved addresses answered within 10 s", -1, null);
             return null;
         } finally {
+            settled.set(true);
             pool.shutdownNow();
         }
+    }
+
+    /** Whether an attempt ended because it was called off, rather than because it failed. A
+     *  timeout is a failure, although Java counts it as an interruption too. */
+    private static boolean cancelled(Exception e) {
+        return Thread.currentThread().isInterrupted() || e instanceof InterruptedException
+                || (e instanceof InterruptedIOException && !(e instanceof SocketTimeoutException));
     }
 
     /** A failure in words: what kind it was (timeout, refused, certificate…) and its detail. */

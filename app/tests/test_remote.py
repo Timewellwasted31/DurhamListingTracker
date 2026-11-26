@@ -27,7 +27,7 @@ def test_only_a_public_router_address_counts_as_reachable(addr, public):
 def test_urls_list_the_public_address_first_only_when_the_mapping_works(monkeypatch):
     monkeypatch.setattr(remote, "lan_ip", lambda: "192.168.1.20")
     monkeypatch.setattr(remote, "tailscale_ip", lambda: None)
-    monkeypatch.setattr(remote, "other_home_ips", lambda: [])
+    monkeypatch.setattr(remote, "hotspot_ip", lambda: None)
     access = remote.RemoteAccess(8443, "ab" * 32)
     assert access.urls() == ["https://192.168.1.20:8443"]
 
@@ -54,12 +54,13 @@ def test_pair_info_is_refused_for_callers_on_other_machines(monkeypatch):
         assert refused.value.status_code == 403
 
 
-def test_the_hotspot_address_is_offered_too(monkeypatch):
+def test_the_hotspot_address_is_offered_too_but_not_virtual_adapters(monkeypatch):
     monkeypatch.setattr(remote, "lan_ip", lambda: "192.168.1.20")
     monkeypatch.setattr(remote, "tailscale_ip", lambda: None)
     monkeypatch.setattr(remote.socket, "getaddrinfo", lambda *a, **k: [
         (None, None, None, None, (addr, 0)) for addr in
-        ("192.168.1.20", "192.168.137.1", "100.70.1.2", "25.1.2.3", "169.254.9.9", "127.0.0.1")])
-    assert remote.other_home_ips() == ["192.168.137.1"]
+        ("192.168.1.20", "192.168.56.1", "172.25.80.1", "192.168.137.1", "100.70.1.2", "25.1.2.3",
+         "169.254.9.9", "127.0.0.1")])
+    assert remote.hotspot_ip() == "192.168.137.1"
     access = remote.RemoteAccess(8443, "ab" * 32)
     assert access.urls() == ["https://192.168.1.20:8443", "https://192.168.137.1:8443"]

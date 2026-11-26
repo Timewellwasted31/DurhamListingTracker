@@ -46,13 +46,13 @@ FIELDS = {  # what a report may carry, and its type
 
 CONNECTIONS_LOG = LOGS_DIR / "phone-connections.log"
 CONNECTIONS_PATH = LOGS_DIR / "phone-connections.json"
-SAVE_EVERY = 60  # seconds between tally saves while nothing changes
+SAVE_AFTER = 5  # seconds: requests that change nothing are saved together, this soon after
 _LOCAL = ("127.0.0.1", "::1", "localhost")
 
 _connections: Optional[dict] = None   # "source|route|phone" -> tally, loaded on first use
 _current: Optional[str] = None        # the combination of the latest request
 _phone_at: dict[str, str] = {}        # source -> what the phone last said about its network
-_saved_at = 0.0
+_save_timer: Optional[threading.Timer] = None
 _connections_lock = threading.Lock()
 
 
@@ -65,7 +65,7 @@ def connection(source: Optional[str], route: Optional[str], phone: Optional[str]
     computer it was sent to (host:port), and `phone` the phone's own network and address as it
     reports them. A request without that report (the page itself, an older app) is taken to come
     from the phone last heard from at the same source. This computer's own requests are skipped."""
-    global _connections, _current, _saved_at
+    global _connections, _current, _save_timer
     if not source or source in _LOCAL:
         return
     route = (route or "?")[:MAX_TEXT]
@@ -94,13 +94,30 @@ def connection(source: Optional[str], route: Optional[str], phone: Optional[str]
                     f"seen before: {entry['requests'] - 1} requests since {entry['first']}")
             _append(CONNECTIONS_LOG, f"{now} | phone {phone} | reached this computer from {source} "
                                      f"via {route} | {note} | {len(_connections)} different connections so far")
-        if changed or time.time() - _saved_at > SAVE_EVERY:
-            _saved_at = time.time()
-            try:
-                LOGS_DIR.mkdir(parents=True, exist_ok=True)
-                CONNECTIONS_PATH.write_text(json.dumps(_connections, indent=1), encoding="utf-8")
-            except OSError as e:
-                logger.warning("Couldn't write %s: %s", CONNECTIONS_PATH, e)
+        if changed:
+            _save_tally()
+        elif _save_timer is None:
+            _save_timer = threading.Timer(SAVE_AFTER, _save_later)
+            _save_timer.daemon = True
+            _save_timer.start()
+
+
+def _save_later() -> None:
+    global _save_timer
+    with _connections_lock:
+        _save_timer = None
+        _save_tally()
+
+
+def _save_tally() -> None:
+    """Write the tally; the caller holds the lock."""
+    if _connections is None:
+        return
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        CONNECTIONS_PATH.write_text(json.dumps(_connections, indent=1), encoding="utf-8")
+    except OSError as e:
+        logger.warning("Couldn't write %s: %s", CONNECTIONS_PATH, e)
 
 
 def _append(path, line: str) -> None:

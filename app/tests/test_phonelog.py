@@ -69,6 +69,8 @@ def connections(tmp_path, monkeypatch):
     monkeypatch.setattr(phonelog, "_connections", None)
     monkeypatch.setattr(phonelog, "_current", None)
     monkeypatch.setattr(phonelog, "_phone_at", {})
+    monkeypatch.setattr(phonelog, "_save_timer", None)
+    monkeypatch.setattr(phonelog, "SAVE_AFTER", 0.05)
     return tmp_path
 
 
@@ -89,3 +91,14 @@ def test_each_change_of_phone_address_or_route_is_logged_and_every_connection_ta
 
     tally = json.loads((connections / "phone-connections.json").read_text(encoding="utf-8"))
     assert sorted(e["requests"] for e in tally.values()) == [1, 4]
+
+
+def test_requests_that_change_nothing_are_saved_soon_after(connections):
+    import json
+    import time
+    phonelog.connection("203.0.113.7", "203.0.113.7:8443", "wifi, wifi 192.168.1.45")
+    for _ in range(3):
+        phonelog.connection("203.0.113.7", "203.0.113.7:8443", None)
+    time.sleep(0.3)
+    tally = json.loads((connections / "phone-connections.json").read_text(encoding="utf-8"))
+    assert [e["requests"] for e in tally.values()] == [4]
